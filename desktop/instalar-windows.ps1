@@ -6,7 +6,7 @@ if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
     throw 'Esta edición de LOCO requiere Windows x64.'
 }
 $endpoint = if ($Tag) { "tags/$Tag" } else { 'latest' }
-$release = Invoke-RestMethod "https://api.github.com/repos/AzAlejandro/LOCO-detector/releases/$endpoint"
+$release = Invoke-RestMethod "https://api.github.com/repos/AzAlejandro/fiber-detector/releases/$endpoint"
 if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') {
     throw 'No se encontró una versión estable de escritorio.'
 }

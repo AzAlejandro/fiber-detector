@@ -5,15 +5,15 @@ All notable changes to LOCO Detector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.2] — 2026-11-25
+## [1.1.2] â€” 2026-11-25
 
-### Versión de prueba de escritorio
+### VersiÃ³n de prueba de escritorio
 
-- Modo Agente con skills por proyecto para scribbles, círculos y cruces. La configuración de cobertura y círculos se aplica a las siguientes propuestas y queda registrada para su revisión.
-- Configuración por pestañas, zoom de la interfaz y análisis de diámetros con calibración por imagen.
-- Instalador de escritorio y conexión MCP local. Los datos del proyecto se guardan aparte del programa para conservarlos durante las actualizaciones.
+- Modo Agente con skills por proyecto para scribbles, cÃ­rculos y cruces. La configuraciÃ³n de cobertura y cÃ­rculos se aplica a las siguientes propuestas y queda registrada para su revisiÃ³n.
+- ConfiguraciÃ³n por pestaÃ±as, zoom de la interfaz y anÃ¡lisis de diÃ¡metros con calibraciÃ³n por imagen.
+- Instalador de escritorio y conexiÃ³n MCP local. Los datos del proyecto se guardan aparte del programa para conservarlos durante las actualizaciones.
 
-## [1.0.0] — 2026-05-19
+## [1.0.0] â€” 2026-05-19
 
 ### Added
 - Initial release of LOCO Detector as a standalone program
@@ -21,11 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LOCO Circle Detection pipeline with ML models (Random Forest, ExtraTrees, XGBoost, CatBoost, LightGBM)
 - Diameter measurement with 3 methodology versions (v1, v2, v3)
 - Hierarchical 3-group UI navigation with backward compatibility
-- Scale calibration system (px → nm/μm) with persistent JSON storage
+- Scale calibration system (px â†’ nm/Î¼m) with persistent JSON storage
 - Statistical distribution histogram with mean, median, std, min, max, and CSV export
-- Pipeline connection: LOCO Detector accepted circles → Diameter Research points
+- Pipeline connection: LOCO Detector accepted circles â†’ Diameter Research points
 - Validation system for manual review of detected circles
-- LOCO Lab experimental pipeline (proposals → filter → measure → evaluate)
+- LOCO Lab experimental pipeline (proposals â†’ filter â†’ measure â†’ evaluate)
 - Dataset management: build, augment, and manage training datasets
 - Training system with binary + multiclass classification
 - Circle-NMS and spatial final filter for overlap removal

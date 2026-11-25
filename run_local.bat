@@ -3,7 +3,8 @@ title LOCO Detector
 setlocal enabledelayedexpansion
 
 echo ============================================
-echo   LOCO Detector v1.0.0
+set /p "LOCO_VERSION="<"%~dp0VERSION"
+echo   LOCO Detector v%LOCO_VERSION%
 echo   Automated circle detection for TEM images
 echo ============================================
 echo.

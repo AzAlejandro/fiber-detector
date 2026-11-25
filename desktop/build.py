@@ -20,6 +20,8 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r'\d+\.\d+\.\d+', args.version):
         parser.error('Se requiere una versión mayor.menor.parche.')
+    if args.version != (REPO / 'VERSION').read_text().strip():
+        parser.error('La versión del instalador debe coincidir con VERSION.')
     mac = sys.platform == 'darwin'
     if (mac and platform.machine() != 'arm64') or (not mac and sys.platform != 'win32'):
         parser.error('Targets: Windows x64, macOS Apple Silicon')

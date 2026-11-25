@@ -6,7 +6,7 @@ AppId=LOCO-Detector-Desktop
 AppName=LOCO Detector
 AppVersion={#ReleaseVersion}
 AppPublisher=LOCO Detector
-AppPublisherURL=https://github.com/AzAlejandro/LOCO-detector
+AppPublisherURL=https://github.com/AzAlejandro/fiber-detector
 DefaultDirName={localappdata}\Programs\LOCO Detector
 PrivilegesRequired=lowest
 #ifdef IsolatedTest

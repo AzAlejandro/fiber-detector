@@ -4,7 +4,7 @@
 
 **Detección automática de círculos y medición de diámetros en imágenes TEM de nanofibras**
 
-![Version](https://img.shields.io/badge/version-v1.0.0-blue)
+![Version](https://img.shields.io/github/v/release/AzAlejandro/fiber-detector)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 ![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker)
@@ -14,9 +14,9 @@
 
 ## Instalar o actualizar
 
-[Versiones para descargar](https://github.com/AzAlejandro/LOCO-detector/releases/latest) · [Guía para personas y agentes](docs/INSTALAR_ACTUALIZAR.md)
+[Versiones para descargar](https://github.com/AzAlejandro/fiber-detector/releases/latest) · [Guía para personas y agentes](docs/INSTALAR_ACTUALIZAR.md)
 
-Puedes pedirle a un agente con acceso local: **«Instala LOCO desde https://github.com/AzAlejandro/LOCO-detector y comprueba la conexión»**. Después basta **«Actualiza LOCO»**. Elige la edición que aparece en los archivos de la release: escritorio para Windows x64 o Mac Apple Silicon cuando estén publicados, o el paquete Docker.
+**«Instala LOCO desde https://github.com/AzAlejandro/fiber-detector y conecta mi agente»**. Después basta **«Actualiza LOCO»**. Para Windows x64 y macOS 15 o posterior con Apple Silicon, descarga el escritorio desde la última versión estable. Las notas de esa versión indican el método de instalación y el estado de firma de cada paquete. El ZIP histórico de Docker está en [v1.0.0](https://github.com/AzAlejandro/fiber-detector/releases/tag/v1.0.0).
 
 Para preparar los instaladores y probar una actualización antes de publicarla, consulta la [guía de distribución de escritorio](docs/PREPARAR_ESCRITORIO.md).
 
@@ -64,7 +64,9 @@ LOCO Detector es una herramienta de análisis científico para imágenes TEM de 
 
 ## 🚀 Quick Start
 
-### Opción A — Docker, recomendado para usuarios
+Para usar el escritorio con tu agente, sigue la [guía de instalación y conexión](docs/INSTALAR_ACTUALIZAR.md).
+
+### Opción A — Docker desde el código fuente
 
 En Windows, desde la raíz del repositorio:
 
@@ -89,8 +91,8 @@ Si la aplicación se ve vacía en una máquina nueva, es normal. El código y el
 ### Opción B — Local, para desarrollo
 
 ```bash
-git clone https://github.com/AzAlejandro/LOCO-detector.git
-cd LOCO-detector
+git clone https://github.com/AzAlejandro/fiber-detector.git
+cd fiber-detector
 ```
 
 En Windows:
@@ -174,8 +176,8 @@ Para publicar y consumir versiones con GitHub Releases en Windows y macOS, usa l
 ### Instalación paso a paso
 
 ```bash
-git clone https://github.com/AzAlejandro/LOCO-detector.git
-cd LOCO-detector
+git clone https://github.com/AzAlejandro/fiber-detector.git
+cd fiber-detector
 python -m venv venv
 venv/Scripts/activate
 pip install -r requirements.txt

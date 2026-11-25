@@ -1,6 +1,6 @@
 # Guia de GitHub Releases para LOCO Detector
 
-La instalación de escritorio y su actualización se describen en [Instalar y actualizar](https://github.com/AzAlejandro/LOCO-detector/blob/main/docs/INSTALAR_ACTUALIZAR.md). Esta guía corresponde al ZIP Docker. Un archivo `loco_project_*.zip` es un proyecto exportado.
+La instalación de escritorio y su actualización se describen en [Instalar y actualizar](https://github.com/AzAlejandro/fiber-detector/blob/main/docs/INSTALAR_ACTUALIZAR.md). Esta guía corresponde al ZIP Docker. Un archivo `loco_project_*.zip` es un proyecto exportado.
 
 ### Antes de actualizar un Docker existente
 

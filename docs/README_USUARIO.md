@@ -2,15 +2,19 @@
 
 Esta version permite ejecutar LOCO Detector sin instalar Python, Node ni dependencias manualmente.
 
-## Procesar imágenes con el agente
+## Procesar imÃ¡genes con el agente
 
-Con el proyecto abierto, adjunta los archivos y escribe **«Procésame estas dos imágenes en LOCO»**. El agente usa el proyecto activo, continúa desde lo guardado y entrega los diámetros en Análisis. Para trabajar solo en una etapa, basta con decir **«Mide los diámetros de estos círculos»**. Para consultar mediciones existentes, di **«Muéstrame los diámetros»**.
+Con el proyecto abierto, adjunta los archivos y escribe **Â«ProcÃ©same estas dos imÃ¡genes en LOCOÂ»**. El agente usa el proyecto activo, continÃºa desde lo guardado y entrega los diÃ¡metros en AnÃ¡lisis. Para trabajar solo en una etapa, basta con decir **Â«Mide los diÃ¡metros de estos cÃ­rculosÂ»**. Para consultar mediciones existentes, di **Â«MuÃ©strame los diÃ¡metrosÂ»**.
 
-Para repetir una prueba desde cero, indícalo en la petición. Cada subagente procesa su propia copia y entrega sus imágenes para revisión. En la comparación de tokens se distinguen entrada nueva, entrada en caché y salida. El trabajo compartido de coordinación se informa aparte. [Instrucciones del agente](../AGENTS.md)
+Para repetir una prueba desde cero, indÃ­calo en la peticiÃ³n. Cada subagente procesa su propia copia y entrega sus imÃ¡genes para revisiÃ³n. En la comparaciÃ³n de tokens se distinguen entrada nueva, entrada en cachÃ© y salida. El trabajo compartido de coordinaciÃ³n se informa aparte. [Instrucciones del agente](../AGENTS.md)
 
-Al importar una imagen nueva, el agente usa el mismo tamaño de trabajo que Scribble: hasta 900 píxeles en el lado mayor, manteniendo la proporción. El archivo original se conserva. Al reabrir una imagen guardada, LOCO usa las dimensiones que ya tiene en la biblioteca. Para esas imágenes, la vista general del agente puede reducirse a 1024 píxeles y el zoom permite revisar el detalle de la copia guardada. Las marcas y la calibración usan píxeles de esa copia.
+Al importar una imagen nueva, el agente usa el mismo tamaÃ±o de trabajo que Scribble: hasta 900 pÃ­xeles en el lado mayor, manteniendo la proporciÃ³n. El archivo original se conserva. Al reabrir una imagen guardada, LOCO usa las dimensiones que ya tiene en la biblioteca. Para esas imÃ¡genes, la vista general del agente puede reducirse a 1024 pÃ­xeles y el zoom permite revisar el detalle de la copia guardada. Las marcas y la calibraciÃ³n usan pÃ­xeles de esa copia.
 
-## Requisito
+## Instalación de escritorio
+
+Para Windows x64 y macOS con Apple Silicon, sigue la [guía de instalación y conexión del agente](INSTALAR_ACTUALIZAR.md).
+
+## Requisitos del paquete Docker v1.0.0
 
 Instala Docker Desktop:
 
@@ -18,7 +22,7 @@ https://www.docker.com/products/docker-desktop/
 
 Despues de instalarlo, abre Docker Desktop y espera a que termine de iniciar.
 
-## Windows
+## Docker en Windows
 
 1. Descomprime `LOCO-detector-v1.0.0-release.zip`.
 2. Entra a la carpeta descomprimida.
@@ -28,7 +32,7 @@ Despues de instalarlo, abre Docker Desktop y espera a que termine de iniciar.
 
 Para cerrar LOCO Detector, haz doble click en `detener_loco_detector.bat`.
 
-## macOS
+## Docker en macOS
 
 1. Descomprime `LOCO-detector-v1.0.0-release.zip`.
 2. Entra a la carpeta descomprimida.

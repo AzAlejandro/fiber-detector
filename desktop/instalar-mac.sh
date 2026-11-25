@@ -18,7 +18,7 @@ if [[ $# -gt 0 ]]; then
   [[ $# -eq 1 && $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Se esperaba un tag vX.Y.Z.' >&2; exit 2; }
   endpoint="tags/$1"
 fi
-curl -fsSL "https://api.github.com/repos/AzAlejandro/LOCO-detector/releases/$endpoint" -o "$tmp/release.json"
+curl -fsSL "https://api.github.com/repos/AzAlejandro/fiber-detector/releases/$endpoint" -o "$tmp/release.json"
 # JXA y Foundation vienen con macOS. Extraer el asset de la misma release que el digest.
 osascript -l JavaScript - "$tmp/release.json" > "$tmp/asset" <<'JS'
 function run(args) {
