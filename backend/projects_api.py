@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from .library_store import list_library_images, update_library_image_tags
 from .projects_store import delete_project, delete_tag, list_projects, rename_tag, set_active_project, set_tag_hidden, tag_catalog, tag_catalog_detailed, upsert_project
 from .diameter_research.analysis_store import sync_image_metadata
+from .agent_targets import AgentTargets
+from .projects_store import set_agent_targets
 
 
 router = APIRouter(prefix='/api/projects', tags=['projects'])
@@ -70,6 +72,14 @@ def _payload() -> dict[str, Any]:
 @router.get('/list')
 def api_projects_list() -> dict[str, Any]:
     return {'ok': True, 'payload': _payload()}
+
+
+@router.post('/{project_id}/agent-targets')
+def update_agent_targets(project_id: str, req: AgentTargets):
+    try:
+        return set_agent_targets(project_id, req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post('/upsert')

@@ -5,6 +5,14 @@ All notable changes to LOCO Detector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-11-25
+
+### Versión de prueba de escritorio
+
+- Modo Agente con skills por proyecto para scribbles, círculos y cruces. La configuración de cobertura y círculos se aplica a las siguientes propuestas y queda registrada para su revisión.
+- Configuración por pestañas, zoom de la interfaz y análisis de diámetros con calibración por imagen.
+- Instalador de escritorio y conexión MCP local. Los datos del proyecto se guardan aparte del programa para conservarlos durante las actualizaciones.
+
 ## [1.0.0] — 2026-05-19
 
 ### Added

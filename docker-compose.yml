@@ -11,6 +11,7 @@ services:
       - "${DOCKER_BACKEND_PORT:-8011}:8011"
     volumes:
       - loco_outputs:/app/outputs
+      - loco_data:/app/data
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8011/api/health"]
       interval: 15s
@@ -33,4 +34,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  loco_data:
   loco_outputs:

@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8012'
+const API_BASE = import.meta.env.VITE_API_BASE === 'same-origin' ? '' : (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8012')
 
 async function parseJsonBody(res) {
   const text = await res.text()

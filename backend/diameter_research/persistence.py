@@ -5,6 +5,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import cv2
@@ -14,8 +15,9 @@ from ..image_codec import to_uint8_rgb
 from .pipeline import METHOD_ID
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = PROJECT_ROOT / 'outputs' / 'scribble_research' / 'diameter_research'
+from ..paths import OUTPUT_ROOT as SCRIBBLE_ROOT
+
+OUTPUT_ROOT = SCRIBBLE_ROOT / 'diameter_research'
 POINTS_DIR = OUTPUT_ROOT / 'points'
 LOCO_DATASET_CIRCLES_DIR = OUTPUT_ROOT / 'loco_dataset_circles'
 RUNS_DIR = OUTPUT_ROOT / 'runs'
@@ -165,6 +167,15 @@ def _normalize_manual_line(item: dict[str, Any] | None, kind: str) -> dict[str, 
     }
 
 
+def normalize_circle_contacts(points, center, radius):
+    if not isinstance(points, list) or len(points) != 4:
+        return None
+    contacts = [_normalize_point_ref(p) for p in points]
+    if not all(p and abs(np.hypot(p['x'] - center['x'], p['y'] - center['y']) - radius) < .02 for p in contacts):
+        return None
+    return contacts if len({(p['x'], p['y']) for p in contacts}) == 4 else None
+
+
 def _normalize_manual_circle(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -173,8 +184,10 @@ def _normalize_manual_circle(item: dict[str, Any] | None) -> dict[str, Any] | No
     if not center or radius is None or radius < 1:
         return None
     geometry_id = str(item.get('geometry_id') or item.get('circle_square_geometry_id') or '').strip()
+    contacts = normalize_circle_contacts(item.get('agent_contacts'), center, radius)
     return {
         'center': center,
+        **({'agent_contacts': contacts} if contacts else {}),
         'radius': float(radius),
         'geometry_id': geometry_id,
         'consumed': bool(item.get('consumed', False)),
@@ -202,6 +215,7 @@ def save_points(
     points: list[dict[str, Any]],
     active_point_idx: int | None = None,
     geometry: dict[str, Any] | None = None,
+    detection_manual_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     ensure_dirs()
     pts = normalize_points(points)
@@ -218,7 +232,19 @@ def save_points(
         'active_point_idx': int(active),
         'geometry': normalize_geometry(geometry),
     }
-    _write_json(_points_path(image_id), payload)
+    path = _points_path(image_id)
+    if image_id.startswith('agent_editor_'):
+        if detection_manual_ids is None and path.exists():
+            detection_manual_ids = _read_json(path).get('detection_manual_ids')
+        if detection_manual_ids is not None:
+            payload['detection_manual_ids'] = detection_manual_ids
+    with NamedTemporaryFile(dir=path.parent, suffix='.tmp', delete=False) as pending:
+        temp_path = Path(pending.name)
+    try:
+        _write_json(temp_path, payload)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     return payload
 
 

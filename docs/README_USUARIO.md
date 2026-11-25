@@ -2,6 +2,14 @@
 
 Esta version permite ejecutar LOCO Detector sin instalar Python, Node ni dependencias manualmente.
 
+## Procesar imágenes con el agente
+
+Con el proyecto abierto, adjunta los archivos y escribe **«Procésame estas dos imágenes en LOCO»**. El agente usa el proyecto activo, continúa desde lo guardado y entrega los diámetros en Análisis. Para trabajar solo en una etapa, basta con decir **«Mide los diámetros de estos círculos»**. Para consultar mediciones existentes, di **«Muéstrame los diámetros»**.
+
+Para repetir una prueba desde cero, indícalo en la petición. Cada subagente procesa su propia copia y entrega sus imágenes para revisión. En la comparación de tokens se distinguen entrada nueva, entrada en caché y salida. El trabajo compartido de coordinación se informa aparte. [Instrucciones del agente](../AGENTS.md)
+
+Al importar una imagen nueva, el agente usa el mismo tamaño de trabajo que Scribble: hasta 900 píxeles en el lado mayor, manteniendo la proporción. El archivo original se conserva. Al reabrir una imagen guardada, LOCO usa las dimensiones que ya tiene en la biblioteca. Para esas imágenes, la vista general del agente puede reducirse a 1024 píxeles y el zoom permite revisar el detalle de la copia guardada. Las marcas y la calibración usan píxeles de esa copia.
+
 ## Requisito
 
 Instala Docker Desktop:

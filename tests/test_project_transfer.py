@@ -58,6 +58,7 @@ def test_export_and_import_preserve_or_replace_conflicts(tmp_path, monkeypatch) 
 
     preserved = transfer._apply_import(zip_path, imported_manifest['entries'], overwrite=False)
     assert preserved == {
+        'scribble_index_repair': {'checked': 0, 'repaired': 0, 'removed_runs': 0},
         'imported_count': 1,
         'skipped_count': 1,
         'replaced_count': 0,

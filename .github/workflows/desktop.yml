@@ -1,0 +1,94 @@
+name: Probar distribución de escritorio
+on:
+  push:
+    branches: ['codex/distribucion-escritorio-*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Versión candidata (X.Y.Z)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  instalar-y-actualizar:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Leer versión de la candidata
+        if: github.event_name == 'push'
+        shell: bash
+        run: echo "VERSION=$(tr -d '\r\n' < VERSION)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - run: uv python install 3.12
+      - if: runner.os == 'Windows'
+        run: ./desktop/test-actualizador.ps1
+      - if: runner.os == 'macOS'
+        run: brew list --versions libomp || brew install libomp
+      - name: Construir motor e interfaz
+        shell: bash
+        run: uv run --no-project --python 3.12 python desktop/build.py stage "$VERSION"
+      - name: Probar instaladores Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = (Resolve-Path stage).Path
+          $app = Join-Path $env:RUNNER_TEMP 'LOCO Prueba'
+          $data = Join-Path $env:RUNNER_TEMP 'Datos prueba'
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (!(Test-Path $iscc)) { $iscc = (Get-Command iscc.exe).Source }
+          foreach ($v in ('0.0.0', $env:VERSION)) {
+            [IO.File]::WriteAllText("$stage/app/VERSION", $v)
+            & $iscc '/Q' "/DStage=$stage" "/DReleaseVersion=$v" desktop/windows.iss
+            if ($LASTEXITCODE) { throw 'Falló la compilación del instalador' }
+            $result = Start-Process "$stage/LOCO-Windows-x64.exe" -ArgumentList ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="' + $app + '"') -Wait -PassThru
+            if ($result.ExitCode) { throw "Instalador: $($result.ExitCode)" }
+            $phase = if ($v -eq '0.0.0') { 'seed' } else { 'verify' }
+            & "$app/runtime/python.exe" desktop/smoke.py $phase $app $data $v
+            if ($LASTEXITCODE) { throw "Falló la comprobación: $phase" }
+          }
+          New-Item -Type Directory entrega
+          Copy-Item "$stage/LOCO-Windows-x64.exe",desktop/instalar-windows.ps1 entrega/
+      - name: Probar instalación y sustitución desde DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p entrega "$RUNNER_TEMP/LOCO prueba" "$RUNNER_TEMP/montaje"
+          bundle=stage/LOCO.app
+          installed="$RUNNER_TEMP/LOCO prueba/LOCO.app"
+          for v in 0.0.0 "$VERSION"; do
+            printf '%s\n' "$v" > "$bundle/Contents/Resources/VERSION"
+            for key in CFBundleVersion CFBundleShortVersionString; do
+              plutil -replace "$key" -string "$v" "$bundle/Contents/Info.plist"
+            done
+            bash desktop/empaquetar-mac.sh "$bundle" entrega/LOCO-macOS-arm64.dmg
+            hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/montaje" entrega/LOCO-macOS-arm64.dmg
+            if [[ -d "$installed" ]]; then mv "$installed" "$RUNNER_TEMP/LOCO-anterior.app"; fi
+            ditto "$RUNNER_TEMP/montaje/LOCO.app" "$installed"
+            hdiutil detach "$RUNNER_TEMP/montaje"
+            phase=seed
+            if [[ "$v" != '0.0.0' ]]; then phase=verify; fi
+            root="$installed/Contents/Resources"
+            "$root/runtime/bin/python3.12" desktop/smoke.py "$phase" "$root" "$RUNNER_TEMP/Datos prueba" "$v"
+          done
+          cp desktop/instalar-mac.sh entrega/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LOCO-${{ matrix.runner }}-${{ env.VERSION }}
+          path: entrega/
+          compression-level: 0
+          if-no-files-found: error

@@ -23,6 +23,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app.py ./
 COPY backend ./backend
+COPY .agents/skills/loco-inicio ./.agents/skills/loco-inicio
+COPY .agents/skills/loco-revision ./.agents/skills/loco-revision
 COPY frontend/public/tutorial ./frontend/public/tutorial
 
 RUN mkdir -p /app/outputs

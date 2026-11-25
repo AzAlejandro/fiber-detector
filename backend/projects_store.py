@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +16,15 @@ from .library_store import list_library_images, normalize_structured_tags, updat
 PROJECTS_DIR = OUTPUT_ROOT / 'projects'
 PROJECTS_PATH = PROJECTS_DIR / 'projects.json'
 TAG_OVERRIDES_PATH = PROJECTS_DIR / 'tag_overrides.json'
+_project_write_lock = RLock()
+
+
+def _project_update(fn):
+    @wraps(fn)
+    def update(*args, **kwargs):
+        with _project_write_lock:
+            return fn(*args, **kwargs)
+    return update
 
 
 def _now() -> str:
@@ -84,7 +96,13 @@ def _save_state(payload: dict[str, Any]) -> dict[str, Any]:
     if active_id and not any(str(item.get('project_id') or '') == active_id for item in projects):
         active_id = ''
     out = {'active_project_id': active_id, 'projects': projects}
-    PROJECTS_PATH.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+    with NamedTemporaryFile(dir=PROJECTS_PATH.parent, delete=False) as tmp:
+        tmp.write(json.dumps(out, ensure_ascii=False, indent=2).encode('utf-8'))
+    path = Path(tmp.name)
+    try:
+        path.replace(PROJECTS_PATH)
+    finally:
+        path.unlink(missing_ok=True)
     return out
 
 
@@ -132,6 +150,7 @@ def get_active_project() -> dict[str, Any] | None:
     return None
 
 
+@_project_update
 def upsert_project(
     project_id: str = '',
     name: str = '',
@@ -174,6 +193,8 @@ def upsert_project(
         'updated_at': now,
     }
     if existing_idx >= 0:
+        if 'agent_targets' in previous:
+            item['agent_targets'] = previous['agent_targets']
         projects[existing_idx] = item
     else:
         projects.append(item)
@@ -205,6 +226,18 @@ def upsert_project(
     return item
 
 
+@_project_update
+def set_agent_targets(project_id, targets):
+    state = _load_state()
+    for project in state['projects']:
+        if project['project_id'] == project_id:
+            project['agent_targets'] = targets
+            _save_state(state)
+            return targets
+    raise ValueError('Proyecto no encontrado.')
+
+
+@_project_update
 def set_active_project(project_id: str = '') -> dict[str, Any]:
     state = _load_state()
     pid = str(project_id or '').strip()
@@ -214,6 +247,7 @@ def set_active_project(project_id: str = '') -> dict[str, Any]:
     return _save_state(state)
 
 
+@_project_update
 def delete_project(project_id: str) -> dict[str, Any]:
     state = _load_state()
     pid = str(project_id or '').strip()
@@ -354,6 +388,7 @@ def _rewrite_tag_items(items: Any, category: str, old_label: str, new_label: str
     return normalize_structured_tags(out)
 
 
+@_project_update
 def rename_tag(category: str, old_label: str, new_label: str) -> dict[str, Any]:
     clean_new = str(new_label or '').strip()
     if not clean_new:
@@ -385,6 +420,7 @@ def rename_tag(category: str, old_label: str, new_label: str) -> dict[str, Any]:
     return tag_catalog_detailed()
 
 
+@_project_update
 def delete_tag(category: str, label: str) -> dict[str, Any]:
     state = _load_state()
     next_projects: list[dict[str, Any]] = []

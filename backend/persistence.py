@@ -21,8 +21,7 @@ from .scribble import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_ROOT = PROJECT_ROOT / 'outputs' / 'scribble_research'
+from .paths import PROJECT_ROOT, OUTPUT_ROOT
 RUNS_DIR = OUTPUT_ROOT / 'runs'
 REVIEWS_DIR = OUTPUT_ROOT / 'reviews'
 INDEX_DIR = OUTPUT_ROOT / 'index'

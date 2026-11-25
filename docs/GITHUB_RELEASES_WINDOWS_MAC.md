@@ -1,5 +1,15 @@
 # Guia de GitHub Releases para LOCO Detector
 
+La instalación de escritorio y su actualización se describen en [Instalar y actualizar](https://github.com/AzAlejandro/LOCO-detector/blob/main/docs/INSTALAR_ACTUALIZAR.md). Esta guía corresponde al ZIP Docker. Un archivo `loco_project_*.zip` es un proyecto exportado.
+
+### Antes de actualizar un Docker existente
+
+La release v1.0.0 contiene imágenes Docker Linux amd64. En un Mac Apple Silicon esa edición requiere emulación amd64 en Docker. El proyecto de ejemplo se descarga por separado.
+
+En v1.0.0, `/app/outputs` está en un volumen y `/app/data` puede estar dentro del contenedor. **Antes de ejecutar un lanzador que haga `down`**, cierra la edición y detén el backend con `docker stop loco-detector-backend`. Conserva el contenedor hasta copiar sus datos. En una carpeta de respaldo nueva y vacía, ejecuta `docker cp loco-detector-backend:/app/data ./data` y `docker cp loco-detector-backend:/app/outputs ./outputs`; comprueba proyectos y calibraciones. Si `/app/data` no existe, confirma que la instalación carece de esos datos. Para un despliegue sin nombre fijo, usa el ID de su backend.
+
+Anota el proyecto Compose anterior con `docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' loco-detector-backend`. Usa ese mismo nombre con `docker compose -p NOMBRE -f docker-compose.release.yml` aunque cambies de carpeta. Con la edición nueva ejecuta `create`, restaura los archivos de `data` al volumen nuevo mediante `docker cp ./data/. loco-detector-backend:/app/data` y después ejecuta `start`. Comprueba proyectos y escalas antes de retirar el respaldo. Usa `/api/health` en 8011 y la web en 5178 para verificar Docker v1.0.0.
+
 Esta guia explica como preparar y publicar una version estable de LOCO Detector usando GitHub Releases, y como usar esa version en Windows o macOS sin instalar Python, Node ni dependencias manuales.
 
 El objetivo es una release offline simple para usuario final. La persona que recibe la release deberia poder instalar Docker Desktop, descomprimir un ZIP, iniciar la aplicacion y luego importar su proyecto desde `Configuracion`.

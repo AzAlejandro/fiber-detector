@@ -68,6 +68,24 @@ When something fails:
 
 ## Token and Context Discipline
 
+For image processing, follow the per-image subagent workflow in [AGENTS.md](AGENTS.md).
+
+For a library image, start with `python -m backend.agent_worklist --imagen PROJECT ID_OR_EXACT_NAME`.
+It returns the saved calibration, scribble pixel counts, mask IDs and pending circles in the latest agent run.
+Use the project skill throughout a batch. Review new candidates and their four crossings on native-resolution
+crops with surrounding context. Expand to the original field where the crop is ambiguous.
+Load full diagnostics only for the relevant image or circle. A resized copy needs its own calibration.
+
+For manually drawn circles in agent mode, read the project's compact worklist first:
+`outputs/scribble_research/agent_tasks/circulos-<project_id>.json` for standard project IDs.
+LOCO refreshes it after edits, removals, edge marking, diameter runs and Analysis saves.
+For offline use or recovery, run `python -m backend.agent_worklist` from the repository root.
+Process only the requested entries in `pendientes` using their run ID, geometry ID and native pixel coordinates.
+Inspect a crop around the circle on the original photo when marking edges. Use the existing LOCO diameter
+method for entries marked `medir`; `registrar` identifies an existing run ready for Analysis.
+Entries in `revisar` already have a rejection. Revisit them when the user requests a review.
+Use the saved `escalas[image_id]` value and unit per pixel for that image.
+
 Use CodeGraph to reduce unnecessary context usage when repository context is needed.
 Read full files only when needed for precise editing or validation.
 Prefer targeted symbol-level investigation over broad exploration.

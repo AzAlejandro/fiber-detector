@@ -2,8 +2,14 @@ import React from 'react'
 
 const UNITS = [
   { value: 'nm', label: 'nm' },
-  { value: 'um', label: 'um' },
+  { value: 'um', label: 'µm' },
 ]
+
+export function convertScaleLength(value, fromUnit, toUnit) {
+  if (fromUnit === toUnit || String(value).trim() === '') return value
+  const number = Number(String(value).replace(',', '.'))
+  return Number.isFinite(number) ? Number((fromUnit === 'nm' ? number / 1000 : number * 1000).toPrecision(15)) : value
+}
 
 export default function CalibrationPanel({
   calibration,
@@ -47,7 +53,8 @@ export default function CalibrationPanel({
                 key={u.value}
                 type="button"
                 className={`btn-small ${calibration.unit === u.value ? 'active' : ''}`}
-                onClick={() => handleChange('unit', u.value)}
+                onClick={() => onChange({ ...calibration, unit: u.value,
+                  known_value: convertScaleLength(calibration.known_value, calibration.unit, u.value) })}
                 disabled={loading}
               >
                 {u.label}
@@ -88,7 +95,7 @@ export default function CalibrationPanel({
       </p>
 
       <div className="calibration-actions">
-        <button onClick={onSave} disabled={loading || !imageId || !hasLine} className="btn-small">
+        <button onClick={onSave} disabled={loading || !imageId || (!hasLine && !calibration.direct_factor)} className="btn-small">
           Guardar
         </button>
       </div>

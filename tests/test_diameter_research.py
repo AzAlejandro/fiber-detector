@@ -52,8 +52,49 @@ from backend.diameter_research.v3.local_orientation import estimate_local_orient
 from backend.diameter_research.v3.multiscale import multiscale_decision
 from backend.diameter_research.v3.recenter import recenter_point_on_local_axis
 from backend.diameter_research.v3.support_roi import build_local_support_roi
+from backend.diameter_research import persistence as diameter_persistence
 from backend.image_codec import encode_gray_png_b64
 from backend.main import app
+from backend.session_store import store
+
+
+def test_circle_batch_previews_and_appends_without_losing_geometry(tmp_path, monkeypatch):
+    monkeypatch.setattr(diameter_persistence, 'POINTS_DIR', tmp_path)
+    session = store.new()
+    session.image_rgb = np.zeros((70, 90, 3), dtype=np.uint8)
+    session.image_id = 'img_circle_batch_test'
+    initial = diameter_persistence.save_points(session.image_id, [
+        {'x': 14, 'y': 14, 'circle_type': 'crossing', 'radius_px': 4},
+    ], geometry={'circles': [{
+        'center': {'x': 14, 'y': 14}, 'radius': 4, 'geometry_id': 'old', 'type': 'crossing',
+    }]})
+    path = tmp_path / f'{session.image_id}.json'
+    before = path.read_bytes()
+    endpoint = '/api/diameter-research/points/circles/batch'
+    request = {'session_id': session.session_id, 'image_id': session.image_id, 'circles': [
+        {'x': 25.4, 'y': 36, 'radius_px': 5},
+        {'x': 72, 'y': 52, 'radius_px': 6},
+    ]}
+    client = TestClient(app)
+    response = client.post(endpoint, json=request)
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview['preview_b64']
+    assert preview['new_count'] == 2 and preview['added_count'] == 0
+    assert path.read_bytes() == before
+    invalid = {**request, 'save': True, 'circles': request['circles'] + [{'x': 1, 'y': 12, 'radius_px': 3}]}
+    assert client.post(endpoint, json=invalid).status_code == 422
+    assert path.read_bytes() == before
+
+    saved = client.post(endpoint, json={**request, 'save': True}).json()
+    assert saved['added_count'] == 2
+    assert saved['points'][:1] == initial['points']
+    assert saved['geometry']['circles'][:1] == initial['geometry']['circles']
+    assert saved['selected'] == preview['selected']
+    assert saved['measurement_request']['points'] == [{'x': 25.4, 'y': 36}, {'x': 72, 'y': 52}]
+    repeated = client.post(endpoint, json={**request, 'save': True}).json()
+    assert repeated['added_count'] == 0
+    assert repeated['geometry'] == saved['geometry']
 
 
 def _fiber_image(size: int = 128, radius_x: int = 18, radius_y: int = 44) -> np.ndarray:

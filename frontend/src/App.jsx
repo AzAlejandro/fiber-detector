@@ -1,9 +1,19 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { flushSync } from 'react-dom'
 import { driver } from 'driver.js'
-import Navigation, { legacyToGroup, groupToLegacy, GROUPS } from './components/Navigation'
+import Navigation, { legacyToGroup, groupToLegacy, isAgentGroup, GROUPS } from './components/Navigation'
 import Histogram from './components/Histogram'
+import HistogramCircles from './components/HistogramCircles'
+import AgentMode from './components/AgentMode'
+import { buildGreenMaskLayer } from './greenMaskLayer'
+import AgentMaskPanel from './components/AgentMaskPanel'
+import { detectCircleContacts } from './agentEdges.mjs'
+import { circleFromDiameter } from './circleGeometry.mjs'
+import AgentTraining from './components/AgentTraining'
+import AgentTargets from './components/AgentTargets'
 import CalibrationPanel from './components/CalibrationPanel'
+import ImageScaleCell from './components/ImageScaleCell'
+import ScalePhotoDialog from './components/ScalePhotoDialog'
 import OriginToast, { showOriginToast } from './components/OriginToast'
 import { TutorialSidebar, TutorialViewer } from './components/TutorialHub'
 import { SCRIBBLE_TUTORIAL_BAD_IMAGE_NAME, SCRIBBLE_TUTORIAL_IMAGE_NAME, TUTORIAL_STORAGE_KEY, TUTORIALS, TUTORIAL_NAV_TABS, getChainedTutorialIds, getTutorialById, getTutorialsByScope } from './tutorials'
@@ -51,6 +61,19 @@ function emptyScribbleTutorialExercise() {
     brush_base_size: 0,
     brush_peak_size: 0,
   }
+}
+
+const MAX_DIAMETER_ZOOM = 128
+
+const interfaceZoomLevels = Array.from({ length: 21 }, (_, index) => 50 + index * 5)
+
+// Pointer events and DOM rectangles use screen CSS pixels. Editors draw in layout pixels.
+function layoutPixels(screenPixels) {
+  return screenPixels / (Number(document.documentElement.style.zoom) || 1)
+}
+
+function stagePoint(rect, clientX, clientY) {
+  return { x: layoutPixels(clientX - rect.left), y: layoutPixels(clientY - rect.top) }
 }
 
 function clamp(v, lo, hi) {
@@ -816,8 +839,8 @@ function CurtainCompare({ title, subtitle, baseUrl, maskUrl, maskClassName = '',
       return
     }
     if (dragPan && panRef.current.dragging) {
-      const dx = e.clientX - panRef.current.x
-      const dy = e.clientY - panRef.current.y
+      const dx = layoutPixels(e.clientX - panRef.current.x)
+      const dy = layoutPixels(e.clientY - panRef.current.y)
       panRef.current = { dragging: true, x: e.clientX, y: e.clientY }
       setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
       e.preventDefault()
@@ -1152,7 +1175,16 @@ export default function App() {
   const [localImageTutorialHint, setLocalImageTutorialHint] = useState({ start_dir: '', image_name: 'overview-reference.png', exists: false, image_exists: false })
   const [systemCapabilities, setSystemCapabilities] = useState({ native_folder_picker: false, open_folder: false, runtime_os: '' })
   const [workspaceTab, setWorkspaceTab] = useState('projectSelect') // projectSelect | projectImages | projectTags | workbench | review | models | scribbleModelManager | locoDataset | locoAugment | locoTraining | locoTest | locoModelManager | locoModel | diameter | diameterAnalysisSelect | diameterAnalysisHistogram | projectTransfer | tutorialHub
-  // New hierarchical navigation state
+  const [interfaceZoom, setInterfaceZoom] = useState(() => {
+    const saved = Number(window.localStorage.getItem('loco.interfaceZoom'))
+    return interfaceZoomLevels.includes(saved) ? saved : 100
+  })
+  useLayoutEffect(() => {
+    document.documentElement.style.zoom = String(interfaceZoom / 100)
+    window.localStorage.setItem('loco.interfaceZoom', String(interfaceZoom))
+  }, [interfaceZoom])
+  const [agentOnly, setAgentOnly] = useState(() => window.localStorage.getItem('loco.agentOnlyNavigation') === 'true')
+  const [agentConnection, setAgentConnection] = useState('')
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('projectSelect').group)
   const [activeTab, setActiveTab] = useState(() => legacyToGroup('projectSelect').tab)
   const [lastTabByGroup, setLastTabByGroup] = useState(() => {
@@ -1220,9 +1252,13 @@ export default function App() {
 
   // Keep workspaceTab in sync when activeGroup changes (for tab change)
   useEffect(() => {
+    if (agentOnly && !isAgentGroup(activeGroup)) {
+      navigateToWorkspace('project', 'projectSelect')
+      return
+    }
     const legacy = groupToLegacy(activeGroup, activeTab)
     if (legacy) setWorkspaceTab(legacy)
-  }, [activeGroup, activeTab])
+  }, [activeGroup, activeTab, agentOnly, navigateToWorkspace])
 
   useEffect(() => {
     if (activeGroup !== 'tutorial') return
@@ -1263,7 +1299,8 @@ export default function App() {
 
   const [diamMethodId, setDiamMethodId] = useState('circle_square_mask_diameter')
   const diamSourceMode = 'prior_mask'
-  const [diamPriorRunId, setDiamPriorRunId] = useState('latest')
+  const [standardPriorRunId, setDiamPriorRunId] = useState('latest')
+  const [useAgentMask, setUseAgentMask] = useState(false)
   const [diamViewerMode, setDiamViewerMode] = useState('circle')
   const [diamViewerZoom, setDiamViewerZoom] = useState(1)
   const [diamViewerOffset, setDiamViewerOffset] = useState({ x: 0, y: 0 })
@@ -1281,6 +1318,18 @@ export default function App() {
   const [manualCircleSelected, setManualCircleSelected] = useState(false)
   const [manualCircleConsumed, setManualCircleConsumed] = useState(false)
   const [manualCircleNextType, setManualCircleNextType] = useState('valid')
+  const circleBatchRequestRef = useRef(0)
+  const [circleBatchText, setCircleBatchText] = useState('')
+  const [circleBatchPreview, setCircleBatchPreview] = useState(null)
+  const [savedCircleBatch, setSavedCircleBatch] = useState(null)
+  const savedBatchCircles = savedCircleBatch?.imageId === imageId ? savedCircleBatch?.circles : null
+  const agentDiameterTab = activeGroup === 'agent' && activeTab === 'agentDiameter'
+  const agentMaskTab = activeGroup === 'agent' && activeTab === 'agentMask'
+  const [preferredAgentMask, setPreferredAgentMask] = useState(null)
+  const agentPriorId = savedCircleBatch?.agentRun && savedCircleBatch.imageId === imageId
+    ? 'agent:' + savedCircleBatch.agentRun : ''
+  const agentMaskActive = workspaceTab === 'diameter' && useAgentMask && !!agentPriorId
+  const diamPriorRunId = agentMaskActive ? agentPriorId : standardPriorRunId
   const [diamManualHistory, setDiamManualHistory] = useState([])
   const [diamManualFuture, setDiamManualFuture] = useState([])
   const [diamPoints, setDiamPoints] = useState([])
@@ -1450,6 +1499,8 @@ export default function App() {
   const [diamAnalysisResult, setDiamAnalysisResult] = useState(null)
   const [diamAnalysisRuns, setDiamAnalysisRuns] = useState([])
   const [diamMeasurementSummaryByImage, setDiamMeasurementSummaryByImage] = useState({})
+  const diamSummaryRequest = useRef(0)
+  const [diamImageScales, setDiamImageScales] = useState(null)
   const [diamAnalysisName, setDiamAnalysisName] = useState('')
   const [diamAnalysisChart, setDiamAnalysisChart] = useState(DEFAULT_DIAM_ANALYSIS_CHART)
   const [diamAnalysisChartPanel, setDiamAnalysisChartPanel] = useState('data')
@@ -1498,6 +1549,10 @@ export default function App() {
   const [loading, setLoading] = useState(emptyLoading())
   const [notice, setNotice] = useState({ level: 'info', title: 'Listo', text: 'Inicializando...' })
   const [draftInfo, setDraftInfo] = useState('')
+  const [settingsPage, setSettingsPage] = useState('Exportar')
+  const [projectSearch, setProjectSearch] = useState('')
+  const [replaceConflicts, setReplaceConflicts] = useState(false)
+  const catalogRequest = useRef(0)
   const [transferCatalog, setTransferCatalog] = useState([])
   const [transferSelection, setTransferSelection] = useState({})
   const [transferMode, setTransferMode] = useState('project')
@@ -1522,6 +1577,12 @@ export default function App() {
   const [transferImportVerifySummary, setTransferImportVerifySummary] = useState(null)
   const [projects, setProjects] = useState([])
   const [activeProjectId, setActiveProjectId] = useState('')
+  const editorRun = agentDiameterTab && savedCircleBatch?.projectId === activeProjectId
+    && savedCircleBatch?.imageId === imageId ? savedCircleBatch.agentRun : ''
+  const standardDiameterFromHistogram = agentDiameterTab && savedCircleBatch?.standardEditor && savedCircleBatch.imageId === imageId
+  const showAgentTools = activeGroup === 'agent' && !editorRun && !standardDiameterFromHistogram && !agentMaskTab
+  const [histogramFocus, setHistogramFocus] = useState(null)
+  const pendingEdges = editorRun ? manualCircles.filter(c => c.agent_contacts?.length !== 4) : []
   const [projectForm, setProjectForm] = useState({ project_id: '', name: '', tags_text: '', source_dir: '', active: true })
   const [projectImageView, setProjectImageView] = useState('active')
   const [projectImageEdits, setProjectImageEdits] = useState({})
@@ -1641,18 +1702,15 @@ export default function App() {
 
   const modelDatasetVisibleRows = useMemo(() => {
     const hasMaskData = Object.keys(maskRunListByImage).length > 0
-    const withMasks = hasMaskData
-      ? modelDataset.filter((item) => {
-          const runs = maskRunListByImage[item.image_id]
-          return runs?.length > 0
-        })
-      : [...modelDataset]
+    const available = hasMaskData
+      ? modelDataset.filter((item) => item.has_scribble_draft || maskRunListByImage[item.image_id]?.length > 0)
+      : modelDataset
     const tagged = modelDatasetRequiredTags.length
-      ? withMasks.filter((item) => {
+      ? available.filter((item) => {
           const imageTags = structuredTagsWithProjects(item.structured_tags || item.tags || [], item.project_ids || [])
           return tagsMatchCategorizedFilter(imageTags, modelDatasetRequiredTags)
         })
-      : withMasks
+      : available
     return [...tagged].sort((a, b) => {
       const dir = modelSort.dir === 'asc' ? 1 : -1
       let va, vb
@@ -1740,11 +1798,11 @@ export default function App() {
   }, [filteredRuns, activeRunId])
 
   useEffect(() => {
-    if (diamPriorRunId === 'latest') return
-    if (!nextStepRuns.some((r) => r.run_id === diamPriorRunId)) {
+    if (standardPriorRunId === 'latest') return
+    if (!nextStepRuns.some((r) => r.run_id === standardPriorRunId)) {
       setDiamPriorRunId('latest')
     }
-  }, [diamPriorRunId, nextStepRuns])
+  }, [standardPriorRunId, nextStepRuns])
 
   const activeRun = runCache[activeRunId] || null
   const activeIndex = useMemo(() => filteredRuns.findIndex((r) => r.run_id === activeRunId), [filteredRuns, activeRunId])
@@ -1756,6 +1814,7 @@ export default function App() {
     return !rectRoughEqual(activeRunExclude, excludeRect)
   }, [activeRun, activeRunExclude, excludeRect])
   const diamVisualMaskUrl = useMemo(() => {
+    if (diamPriorRunId.startsWith('agent:')) return API_BASE + '/api/agent/runs/' + diamPriorRunId.slice(6) + '/layers/mascara'
     const priorRunId = diamPriorRunId === 'latest' ? (nextStepRuns[0]?.run_id || '') : diamPriorRunId
     const priorRun = priorRunId ? runCache[priorRunId] : null
     if (priorRun?.mask_b64) return b64ToDataUrl(priorRun.mask_b64)
@@ -1971,35 +2030,6 @@ export default function App() {
     }
   }
 
-  async function buildGreenMaskLayer(maskUrl) {
-    if (!maskUrl) return ''
-    const img = new Image()
-    await new Promise((resolve, reject) => {
-      img.onload = resolve
-      img.onerror = () => reject(new Error('No se pudo renderizar la mascara.'))
-      img.src = maskUrl
-    })
-    const w = Math.max(1, img.naturalWidth || img.width || imageDims.w || 1)
-    const h = Math.max(1, img.naturalHeight || img.height || imageDims.h || 1)
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    if (!ctx) return ''
-    ctx.drawImage(img, 0, 0, w, h)
-    const image = ctx.getImageData(0, 0, w, h)
-    const data = image.data
-    for (let i = 0; i < data.length; i += 4) {
-      const lum = Math.max(data[i], data[i + 1], data[i + 2])
-      data[i] = 25
-      data[i + 1] = 214
-      data[i + 2] = 107
-      data[i + 3] = lum > 8 ? lum : 0
-    }
-    ctx.putImageData(image, 0, 0)
-    return canvas.toDataURL('image/png')
-  }
-
   function setLoad(k, v) {
     setLoading((prev) => ({ ...prev, [k]: v }))
   }
@@ -2007,7 +2037,7 @@ export default function App() {
   async function withLoad(k, fn) {
     setLoad(k, true)
     try {
-      await fn()
+      return await fn()
     } finally {
       setLoad(k, false)
     }
@@ -2382,40 +2412,50 @@ export default function App() {
   }
 
   async function refreshTransferCatalog() {
-    await withLoad('transferCatalog', async () => {
-      try {
-        const ids = transferMode === 'project' && transferExportMode !== 'advanced' ? transferProjectIds : []
-        const query = new URLSearchParams()
-        query.set('mode', transferMode === 'project' ? 'project' : 'full')
-        if (ids.length) query.set('project_ids', ids.join(','))
-        const res = await apiGet(`/api/project-transfer/catalog?${query.toString()}`)
-        const categories = Array.isArray(res?.categories) ? res.categories : []
-        const projectCatalogs = Array.isArray(res?.project_catalogs) ? res.project_catalogs : []
-        const selection = {}
-        categories.forEach((item) => { selection[item.key] = transferSelection[item.key] ?? item.selected !== false })
-        setTransferCatalog(categories)
-        setTransferProjectCatalogs(projectCatalogs)
-        setTransferSelection(selection)
-        setTransferProjectCategorySelection((prev) => {
-          const next = { ...(prev || {}) }
-          projectCatalogs.forEach((row) => {
-            const projectId = String(row.project_id || '')
-            if (!projectId || !transferProjectIds.includes(projectId) || next[projectId]) return
-            next[projectId] = (Array.isArray(row.categories) ? row.categories : [])
-              .filter((item) => item.selected !== false)
-              .map((item) => item.key)
-          })
-          if (transferExportMode !== 'advanced') {
-            Object.keys(next).forEach((projectId) => {
-              if (!transferProjectIds.includes(projectId)) delete next[projectId]
-            })
-          }
-          return next
+    const request = ++catalogRequest.current
+    if (transferMode === 'project' && transferExportMode === 'simple' && !transferProjectIds.length) {
+      setTransferCatalog([])
+      setLoad('transferCatalog', false)
+      return
+    }
+    setLoad('transferCatalog', true)
+    try {
+      const ids = transferMode === 'project' && transferExportMode !== 'advanced' ? transferProjectIds : []
+      const query = new URLSearchParams()
+      query.set('mode', transferMode === 'project' ? 'project' : 'full')
+      if (ids.length) query.set('project_ids', ids.join(','))
+      const res = await apiGet(`/api/project-transfer/catalog?${query.toString()}`)
+      if (request !== catalogRequest.current) return
+      const categories = Array.isArray(res?.categories) ? res.categories : []
+      const projectCatalogs = Array.isArray(res?.project_catalogs) ? res.project_catalogs : []
+      setTransferCatalog(categories)
+      setTransferProjectCatalogs(projectCatalogs)
+      setTransferSelection(prev => Object.fromEntries(categories.map(item => [item.key, prev[item.key] ?? (item.selected !== false)])))
+      setTransferProjectCategorySelection((prev) => {
+        const next = { ...(prev || {}) }
+        projectCatalogs.forEach((row) => {
+          const projectId = String(row.project_id || '')
+          if (!projectId || !transferProjectIds.includes(projectId) || next[projectId]) return
+          next[projectId] = (Array.isArray(row.categories) ? row.categories : [])
+            .filter((item) => item.selected !== false)
+            .map((item) => item.key)
         })
-      } catch (err) {
-        toast('error', 'Configuracion', errMsg(err))
+        if (transferExportMode !== 'advanced') {
+          Object.keys(next).forEach((projectId) => {
+            if (!transferProjectIds.includes(projectId)) delete next[projectId]
+          })
+        }
+        return next
+      })
+    } catch (err) {
+      if (request === catalogRequest.current) {
+        setTransferCatalog([])
+        setTransferProjectCatalogs([])
+        toast('error', 'Configuración', errMsg(err))
       }
-    })
+    } finally {
+      if (request === catalogRequest.current) setLoad('transferCatalog', false)
+    }
   }
 
   function toggleTransferCategory(key) {
@@ -2439,7 +2479,7 @@ export default function App() {
   function toggleTransferProjectOpen(projectId) {
     const id = String(projectId || '')
     if (!id) return
-    setTransferProjectOpen((prev) => ({ ...prev, [id]: !prev[id] }))
+    setTransferProjectOpen((prev) => ({ ...prev, [id]: prev[id] === false }))
   }
 
   function setAllTransferProjectCategories(projectId, checked) {
@@ -2460,26 +2500,14 @@ export default function App() {
     })
   }
 
-  function toggleTransferProject(projectId) {
-    const id = String(projectId || '')
-    if (!id) return
-    setTransferProjectIds((prev) => {
-      const current = Array.isArray(prev) ? prev : []
-      const exists = current.includes(id)
-      if (exists) {
-        setTransferProjectCategorySelection((sel) => {
-          const next = { ...(sel || {}) }
-          delete next[id]
-          return next
-        })
-        return current.filter((item) => item !== id)
+  function selectTransferProjects(ids, checked) {
+    setTransferProjectIds(prev => checked ? [...new Set([...prev, ...ids])] : prev.filter(id => !ids.includes(id)))
+    setTransferProjectCategorySelection(prev => {
+      const next = { ...prev }
+      for (const id of ids) {
+        delete next[id]
       }
-      setTransferProjectOpen((open) => ({ ...open, [id]: true }))
-      setTransferProjectCategorySelection((sel) => ({
-        ...(sel || {}),
-        [id]: transferProjectCategories(id).map((item) => item.key).filter(Boolean),
-      }))
-      return [...current, id]
+      return next
     })
   }
 
@@ -2510,7 +2538,7 @@ export default function App() {
     }
     const categories = isPerProject
       ? Array.from(new Set(Object.values(projectCategorySelection).flat()))
-      : transferCatalog.filter((item) => transferSelection[item.key]).map((item) => item.key)
+      : exportCategories.map(item => item.key)
     if (!categories.length && !Object.keys(projectCategorySelection).length) {
       toast('warning', 'Exportar proyecto', 'Selecciona al menos una categoria.')
       return
@@ -3199,8 +3227,9 @@ export default function App() {
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const localX = (clientX - rect.left - metrics.x) / metrics.scale
-    const localY = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const localX = (point.x - metrics.x) / metrics.scale
+    const localY = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(localX) || !Number.isFinite(localY)) return null
     if (localX < 0 || localY < 0 || localX >= imageDims.w || localY >= imageDims.h) return null
     return { x: localX, y: localY }
@@ -3213,8 +3242,9 @@ export default function App() {
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const rawX = (clientX - rect.left - metrics.x) / metrics.scale
-    const rawY = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const rawX = (point.x - metrics.x) / metrics.scale
+    const rawY = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return null
     const x = clamp(rawX, 0, Math.max(0, imageDims.w - 1))
     const y = clamp(rawY, 0, Math.max(0, imageDims.h - 1))
@@ -3287,8 +3317,8 @@ export default function App() {
     setBrushMousePos({ x: e.clientX, y: e.clientY })
     if (viewerMode === 'pan') {
       if (!panStateRef.current.dragging) return
-      const dx = e.clientX - panStateRef.current.x
-      const dy = e.clientY - panStateRef.current.y
+      const dx = layoutPixels(e.clientX - panStateRef.current.x)
+      const dy = layoutPixels(e.clientY - panStateRef.current.y)
       panStateRef.current = { dragging: true, x: e.clientX, y: e.clientY }
       setViewerOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
       e.preventDefault()
@@ -3338,8 +3368,7 @@ export default function App() {
     const metrics = getEditorRenderMetrics()
     if (!metrics) return
     const rect = stage.getBoundingClientRect()
-    const localX = clientX - rect.left
-    const localY = clientY - rect.top
+    const { x: localX, y: localY } = stagePoint(rect, clientX, clientY)
     const imageX = (localX - metrics.x) / metrics.scale
     const imageY = (localY - metrics.y) / metrics.scale
     if (!Number.isFinite(imageX) || !Number.isFinite(imageY)) {
@@ -3419,7 +3448,7 @@ export default function App() {
     return true
   }
 
-  async function mergeScribbleMapFromB64(scribbleB64) {
+  async function mergeScribbleMapFromB64(scribbleB64, onlyUnpainted = false) {
     const labels = labelsCanvasRef.current
     if (!labels || !scribbleB64) return 0
     const img = new Image()
@@ -3442,6 +3471,7 @@ export default function App() {
     let changed = 0
     for (let i = 0; i < s.length; i += 4) {
       if (s[i + 3] < 16) continue
+      if (onlyUnpainted && d[i + 3] >= 16 && d[i]) continue
       const v = s[i]
       let q = 0
       if (v >= 224) q = 255
@@ -3550,7 +3580,8 @@ export default function App() {
     const sid = String(targetImageId || '').trim()
     if (!sessionId || !sid) return
     try {
-      const originParam = String(targetOrigin || scribbleOrigin || '').trim()
+      const savedOrigin = savedImages.find((item) => item.image_id === sid)?.scribble_origin
+      const originParam = String(targetOrigin || savedOrigin || '').trim()
       let url = `/api/scribble/draft/load?session_id=${encodeURIComponent(sessionId)}&image_id=${encodeURIComponent(sid)}`
       if (originParam) {
         url += `&origin=${encodeURIComponent(originParam)}`
@@ -3563,6 +3594,7 @@ export default function App() {
       }
       await restoreScribbleMapFromB64(payload.scribble_map_b64)
       scribbleAutosaveDirtyRef.current = false
+      setScribbleOrigin(String(payload?.meta?.scribble_origin || ''))
       const ts = String(payload?.meta?.updated_at || '')
       setDraftInfo(ts ? `Draft restaurado: ${ts}` : 'Draft restaurado')
     } catch (err) {
@@ -3708,9 +3740,9 @@ export default function App() {
   }, [workspaceTab, locoDefaultPreset, locoModelCustomPresets, locoHiddenBuiltinPresets])
 
   useEffect(() => {
-    if (workspaceTab !== 'projectTransfer') return
+    if (workspaceTab !== 'projectTransfer' || settingsPage !== 'Exportar') return
     refreshTransferCatalog()
-  }, [workspaceTab, transferMode, transferExportMode, activeProjectId, transferProjectIds.join(',')])
+  }, [workspaceTab, settingsPage, transferMode, transferExportMode, activeProjectId, transferProjectIds.join(',')])
 
   useEffect(() => {
     if (!['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) return
@@ -3720,10 +3752,23 @@ export default function App() {
 
   useEffect(() => {
     if (!['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) return
-    const timer = window.setTimeout(() => {
-      queryDiameterMeasurements()
+    let current = true
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await apiPost('/api/diameter-research/measurements/query', {
+          ...diameterAnalysisFilters(),
+          unit: diamAnalysisUnit,
+          include_uncalibrated: diamAnalysisIncludeUncalibrated,
+        })
+        if (current) setDiamAnalysisResult(res?.payload || null)
+      } catch (err) {
+        if (current) {
+          setDiamAnalysisResult(null)
+          toast('error', 'Análisis de diámetros', errMsg(err))
+        }
+      }
     }, 180)
-    return () => window.clearTimeout(timer)
+    return () => { current = false; window.clearTimeout(timer) }
   }, [
     workspaceTab,
     diamAnalysisUnit,
@@ -3732,6 +3777,7 @@ export default function App() {
     activeProjectId,
     diamAnalysisSelectionKey,
     diamAnalysisTagKey,
+    diamMeasurementSummaryByImage,
   ])
 
   useEffect(() => {
@@ -3764,7 +3810,7 @@ export default function App() {
     if (!stage) return
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setStageSize({ w: r.width, h: r.height })
+      setStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -3807,7 +3853,7 @@ export default function App() {
     if (!stage) return
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setDiamStageSize({ w: r.width, h: r.height })
+      setDiamStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -3824,7 +3870,7 @@ export default function App() {
     if (!stage) return
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setLocoDatasetStageSize({ w: r.width, h: r.height })
+      setLocoDatasetStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -3841,7 +3887,7 @@ export default function App() {
     if (!stage) return
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setLocoTestStageSize({ w: r.width, h: r.height })
+      setLocoTestStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -3858,7 +3904,7 @@ export default function App() {
     if (!stage) return
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setLocoModelStageSize({ w: r.width, h: r.height })
+      setLocoModelStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -3927,7 +3973,7 @@ export default function App() {
     if (!stage) return undefined
     const update = () => {
       const r = stage.getBoundingClientRect()
-      setPointReviewStageSize({ w: r.width, h: r.height })
+      setPointReviewStageSize({ w: layoutPixels(r.width), h: layoutPixels(r.height) })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -4040,7 +4086,7 @@ export default function App() {
   }, [workspaceTab, annotHistory, annotFuture])
 
   useEffect(() => {
-    if (workspaceTab !== 'diameter') return undefined
+    if (workspaceTab !== 'diameter' || showAgentTools) return undefined
     const onKey = (ev) => {
       const tag = String(document.activeElement?.tagName || '').toUpperCase()
       const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
@@ -4089,7 +4135,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [workspaceTab, diamMethodId, diamViewerMode, diamManualHistory, diamManualFuture, manualMaskLineDraft, manualDirectLineDraft, manualCircleDraft, manualCircles, manualCircleActiveIdx, manualCircleSelected, manualCircleNextType, diamPoints, diamActivePointIdx])
+  }, [workspaceTab, showAgentTools, editorRun, diamMethodId, diamViewerMode, diamManualHistory, diamManualFuture, manualDirectLineDraft, manualMaskLineDraft, manualCircleDraft, manualCircles, manualCircleActiveIdx, manualCircleSelected, manualCircleNextType, diamPoints, diamActivePointIdx])
 
   useEffect(() => {
     if (workspaceTab !== 'locoDataset') return undefined
@@ -5309,6 +5355,10 @@ export default function App() {
   }
 
   function resetImageScopedState() {
+    circleBatchRequestRef.current += 1
+    setCircleBatchText('')
+    setCircleBatchPreview(null)
+    setSavedCircleBatch(null)
     console.log('[DEBUG-LOAD] resetImageScopedState called, clearing locoDatasetCircles')
     void clearLocoModelBackendState()
     clearLocoDatasetLocalState()
@@ -5375,15 +5425,16 @@ export default function App() {
     resetImageScopedState()
   }
 
-  async function loadSavedImage(imageIdToLoad, targetOrigin) {
+  async function loadSavedImage(imageIdToLoad, targetOrigin, openEditor = false) {
     console.log('[DEBUG-LOAD2] loadSavedImage called with:', imageIdToLoad)
     const sid = await ensureSessionReady()
     const target = String(imageIdToLoad || '').trim()
     if (!sid || !target) { console.log('[DEBUG-LOAD2] loadSavedImage EARLY RETURN sid=', sid, 'target=', target); return }
     await flushDraftIfNeeded()
-    await withLoad('libraryLoad', async () => {
+    return withLoad('libraryLoad', async () => {
       try {
-        const originParam = String(targetOrigin || scribbleOrigin || '').trim()
+        const savedOrigin = savedImages.find((item) => item.image_id === target)?.scribble_origin
+        const originParam = String(targetOrigin || savedOrigin || '').trim()
         const res = await apiPost('/api/library/load', {
           session_id: sid,
           image_id: target,
@@ -5408,6 +5459,12 @@ export default function App() {
         // Restore scribble origin from draft meta
         const draftMeta = draft?.meta || {}
         setScribbleOrigin(String(draftMeta.scribble_origin || ''))
+        if (openEditor) {
+          setScribbleOverlayTransparency(0)
+          setWorkbenchPanelTab('editor')
+          if (agentOnly) navigateToWorkspace('agent', 'agentMask')
+          else navigateToWorkspace('scribble', 'workbench')
+        }
         await refreshSavedImages(sid)
         await refreshResults(loadedImageId)
         await loadDiameterPoints(sid, loadedImageId, { silent: true })
@@ -5421,6 +5478,7 @@ export default function App() {
           setDiamPriorRunId(runs[idx].run_id)
         }
         toast('success', 'Imagen guardada', `Cargada: ${loadedImageId}`)
+        return loadedImageId
       } catch (err) {
         toast('error', 'Imagen guardada', errMsg(err))
       }
@@ -5475,7 +5533,7 @@ export default function App() {
 
   useEffect(() => {
     const priorRunId = diamPriorRunId === 'latest' ? (nextStepRuns[0]?.run_id || '') : diamPriorRunId
-    if (priorRunId) loadRunIfNeeded(priorRunId)
+    if (priorRunId && !priorRunId.startsWith('agent:')) loadRunIfNeeded(priorRunId)
   }, [diamPriorRunId, nextStepRuns])
 
   useEffect(() => {
@@ -5594,16 +5652,18 @@ export default function App() {
     return { scale, x, y }
   }
 
-  function diameterPointFromClient(clientX, clientY) {
+  function diameterPointFromClient(clientX, clientY, allowOutside = false) {
     const stage = diameterStageRef.current
     if (!stage || !imageDims.w || !imageDims.h) return null
     const metrics = getDiameterRenderMetrics()
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const x = (clientX - rect.left - metrics.x) / metrics.scale
-    const y = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const x = (point.x - metrics.x) / metrics.scale
+    const y = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    if (allowOutside) return { x, y }
     if (x < 0 || y < 0 || x >= imageDims.w || y >= imageDims.h) return null
     return {
       x: clamp(x, 0, Math.max(0, imageDims.w - 1)),
@@ -5618,8 +5678,9 @@ export default function App() {
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const x = (clientX - rect.left - metrics.x) / metrics.scale
-    const y = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const x = (point.x - metrics.x) / metrics.scale
+    const y = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
     if (x < 0 || y < 0 || x >= imageDims.w || y >= imageDims.h) return null
     return {
@@ -5635,8 +5696,9 @@ export default function App() {
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const x = (clientX - rect.left - metrics.x) / metrics.scale
-    const y = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const x = (point.x - metrics.x) / metrics.scale
+    const y = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
     if (x < 0 || y < 0 || x >= imageDims.w || y >= imageDims.h) return null
     return {
@@ -5652,8 +5714,9 @@ export default function App() {
     if (!metrics) return null
     const rect = stage.getBoundingClientRect()
     if (rect.width < 1 || rect.height < 1) return null
-    const x = (clientX - rect.left - metrics.x) / metrics.scale
-    const y = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const x = (point.x - metrics.x) / metrics.scale
+    const y = (point.y - metrics.y) / metrics.scale
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
     if (clampToImage) {
       return {
@@ -5670,7 +5733,12 @@ export default function App() {
 
   function zoomDiameterBy(factor) {
     if (!imageUrl) return
-    setDiamViewerZoom((prev) => clamp(prev * factor, 0.25, 12))
+    const rect = diameterStageRef.current?.getBoundingClientRect()
+    if (rect?.width) {
+      zoomDiameterAt(rect.left + rect.width / 2, rect.top + rect.height / 2, factor)
+    } else {
+      setDiamViewerZoom((prev) => clamp(prev * factor, 0.25, MAX_DIAMETER_ZOOM))
+    }
   }
 
   function zoomDiameterAt(clientX, clientY, factor) {
@@ -5678,33 +5746,35 @@ export default function App() {
     const stage = diameterStageRef.current
     const metrics = getDiameterRenderMetrics()
     if (!stage || !metrics) {
-      zoomDiameterBy(factor)
+      setDiamViewerZoom(prev => clamp(prev * factor, 0.25, MAX_DIAMETER_ZOOM))
       return
     }
     const rect = stage.getBoundingClientRect()
-    const imgX = (clientX - rect.left - metrics.x) / metrics.scale
-    const imgY = (clientY - rect.top - metrics.y) / metrics.scale
-    const nextZoom = clamp(diamViewerZoom * factor, 0.25, 12)
+    const point = stagePoint(rect, clientX, clientY)
+    const imgX = (point.x - metrics.x) / metrics.scale
+    const imgY = (point.y - metrics.y) / metrics.scale
+    const nextZoom = clamp(diamViewerZoom * factor, 0.25, MAX_DIAMETER_ZOOM)
     const fit = Math.min(diamStageSize.w / Math.max(1, imageDims.w), diamStageSize.h / Math.max(1, imageDims.h))
     const nextScale = Math.max(0.0001, fit * nextZoom)
     setDiamViewerZoom(nextZoom)
     setDiamViewerOffset({
-      x: clientX - rect.left - imgX * nextScale - (diamStageSize.w - imageDims.w * nextScale) * 0.5,
-      y: clientY - rect.top - imgY * nextScale - (diamStageSize.h - imageDims.h * nextScale) * 0.5,
+      x: point.x - imgX * nextScale - (diamStageSize.w - imageDims.w * nextScale) * 0.5,
+      y: point.y - imgY * nextScale - (diamStageSize.h - imageDims.h * nextScale) * 0.5,
     })
   }
 
-  function centerDiameterViewerOnPoint(point, { preferredZoom = 2 } = {}) {
+  function centerDiameterViewerOnPoint(point, radius) {
     if (!point || !imageUrl || !imageDims.w || !imageDims.h) return false
     const x = Number(point.x)
     const y = Number(point.y)
     if (!Number.isFinite(x) || !Number.isFinite(y)) return false
     const rect = diameterStageRef.current?.getBoundingClientRect?.()
-    const stageW = Number(rect?.width || diamStageSize.w || 0)
-    const stageH = Number(rect?.height || diamStageSize.h || 0)
+    const stageW = layoutPixels(rect?.width || 0) || diamStageSize.w || 0
+    const stageH = layoutPixels(rect?.height || 0) || diamStageSize.h || 0
     if (stageW < 1 || stageH < 1) return false
-    const zoom = clamp(Number.isFinite(Number(diamViewerZoom)) && Number(diamViewerZoom) > 0 ? Math.max(Number(diamViewerZoom), preferredZoom) : preferredZoom, 0.25, 12)
     const fit = Math.min(stageW / Math.max(1, imageDims.w), stageH / Math.max(1, imageDims.h))
+    const detailSize = Math.min(210, Math.min(stageW, stageH) * 0.52)
+    const zoom = clamp(radius > 0 ? detailSize / (2 * radius * fit) : Math.max(diamViewerZoom, 2), 0.25, MAX_DIAMETER_ZOOM)
     const scale = Math.max(0.0001, fit * zoom)
     setDiamViewerZoom(zoom)
     setDiamViewerOffset({
@@ -5728,15 +5798,16 @@ export default function App() {
       return
     }
     const rect = stage.getBoundingClientRect()
-    const imgX = (clientX - rect.left - metrics.x) / metrics.scale
-    const imgY = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const imgX = (point.x - metrics.x) / metrics.scale
+    const imgY = (point.y - metrics.y) / metrics.scale
     const nextZoom = clamp(locoDatasetZoom * factor, 0.25, 12)
     const fit = Math.min(locoDatasetStageSize.w / Math.max(1, imageDims.w), locoDatasetStageSize.h / Math.max(1, imageDims.h))
     const nextScale = Math.max(0.0001, fit * nextZoom)
     setLocoDatasetZoom(nextZoom)
     setLocoDatasetOffset({
-      x: clientX - rect.left - imgX * nextScale - (locoDatasetStageSize.w - imageDims.w * nextScale) * 0.5,
-      y: clientY - rect.top - imgY * nextScale - (locoDatasetStageSize.h - imageDims.h * nextScale) * 0.5,
+      x: point.x - imgX * nextScale - (locoDatasetStageSize.w - imageDims.w * nextScale) * 0.5,
+      y: point.y - imgY * nextScale - (locoDatasetStageSize.h - imageDims.h * nextScale) * 0.5,
     })
   }
 
@@ -5754,15 +5825,16 @@ export default function App() {
       return
     }
     const rect = stage.getBoundingClientRect()
-    const imgX = (clientX - rect.left - metrics.x) / metrics.scale
-    const imgY = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const imgX = (point.x - metrics.x) / metrics.scale
+    const imgY = (point.y - metrics.y) / metrics.scale
     const nextZoom = clamp(locoTestZoom * factor, 0.25, 12)
     const fit = Math.min(locoTestStageSize.w / Math.max(1, imageDims.w), locoTestStageSize.h / Math.max(1, imageDims.h))
     const nextScale = Math.max(0.0001, fit * nextZoom)
     setLocoTestZoom(nextZoom)
     setLocoTestOffset({
-      x: clientX - rect.left - imgX * nextScale - (locoTestStageSize.w - imageDims.w * nextScale) * 0.5,
-      y: clientY - rect.top - imgY * nextScale - (locoTestStageSize.h - imageDims.h * nextScale) * 0.5,
+      x: point.x - imgX * nextScale - (locoTestStageSize.w - imageDims.w * nextScale) * 0.5,
+      y: point.y - imgY * nextScale - (locoTestStageSize.h - imageDims.h * nextScale) * 0.5,
     })
   }
 
@@ -5780,15 +5852,16 @@ export default function App() {
       return
     }
     const rect = stage.getBoundingClientRect()
-    const imgX = (clientX - rect.left - metrics.x) / metrics.scale
-    const imgY = (clientY - rect.top - metrics.y) / metrics.scale
+    const point = stagePoint(rect, clientX, clientY)
+    const imgX = (point.x - metrics.x) / metrics.scale
+    const imgY = (point.y - metrics.y) / metrics.scale
     const nextZoom = clamp(locoModelZoom * factor, 0.25, 12)
     const fit = Math.min(locoModelStageSize.w / Math.max(1, imageDims.w), locoModelStageSize.h / Math.max(1, imageDims.h))
     const nextScale = Math.max(0.0001, fit * nextZoom)
     setLocoModelZoom(nextZoom)
     setLocoModelOffset({
-      x: clientX - rect.left - imgX * nextScale - (locoModelStageSize.w - imageDims.w * nextScale) * 0.5,
-      y: clientY - rect.top - imgY * nextScale - (locoModelStageSize.h - imageDims.h * nextScale) * 0.5,
+      x: point.x - imgX * nextScale - (locoModelStageSize.w - imageDims.w * nextScale) * 0.5,
+      y: point.y - imgY * nextScale - (locoModelStageSize.h - imageDims.h * nextScale) * 0.5,
     })
   }
 
@@ -6131,6 +6204,11 @@ export default function App() {
     }
   }
 
+  function drawnDiameterCircle(e, drag) {
+    const end = diameterPointFromClient(e.clientX, e.clientY, true)
+    return end && { ...circleFromDiameter(drag.start, end, imageDims.w, imageDims.h), geometry_id: drag.geometry_id }
+  }
+
   function onDiameterPointerDown(e) {
     if (!imageUrl) return
     if (diamViewerMode === 'calibration') {
@@ -6166,8 +6244,9 @@ export default function App() {
       if (!p) return
       rememberDiameterManualState()
       const geometryId = makeManualGeometryId('circle', p, p)
-      diamCircleDragRef.current = { dragging: true, center: p, geometry_id: geometryId, pointerId: e.pointerId }
-      setManualCircleDraft({ center: p, radius: 1, geometry_id: geometryId })
+      diamCircleDragRef.current = { dragging: true, start: p, geometry_id: geometryId, pointerId: e.pointerId,
+        previousDraft: manualCircleDraft, previousSelected: manualCircleSelected, previousConsumed: manualCircleConsumed }
+      setManualCircleDraft({ center: p, radius: 0, geometry_id: geometryId })
       setManualCircleSelected(false)
       setManualCircleConsumed(false)
       e.currentTarget.setPointerCapture?.(e.pointerId)
@@ -6220,23 +6299,14 @@ export default function App() {
       return
     }
     if (diamCircleDragRef.current.dragging) {
-      const p = diameterPointFromClient(e.clientX, e.clientY)
-      const center = diamCircleDragRef.current.center
-      if (p && center) {
-        const dx = Number(p.x) - Number(center.x)
-        const dy = Number(p.y) - Number(center.y)
-        const radius = clamp(Math.sqrt(dx * dx + dy * dy), 1, Math.max(2, Number(diamParams.circle_square_max_radius_px) || 26))
-        setManualCircleDraft({ center, radius, geometry_id: diamCircleDragRef.current.geometry_id })
-        setManualCircleSelected(false)
-        setManualCircleConsumed(false)
-        setDiamParams((prev) => ({ ...prev, circle_square_seed_mode: 'manual_circle', circle_square_seed_radius_px: Number(radius.toFixed(1)) }))
-      }
+      const draft = drawnDiameterCircle(e, diamCircleDragRef.current)
+      if (draft) setManualCircleDraft(draft)
       e.preventDefault()
       return
     }
     if (!diamPanRef.current.dragging) return
-    const dx = e.clientX - diamPanRef.current.x
-    const dy = e.clientY - diamPanRef.current.y
+    const dx = layoutPixels(e.clientX - diamPanRef.current.x)
+    const dy = layoutPixels(e.clientY - diamPanRef.current.y)
     diamPanRef.current = { ...diamPanRef.current, dragging: true, x: e.clientX, y: e.clientY }
     setDiamViewerOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
     e.preventDefault()
@@ -6291,44 +6361,35 @@ export default function App() {
       return
     }
     if (diamCircleDragRef.current.dragging) {
-      const center = diamCircleDragRef.current.center
-      const geometryId = diamCircleDragRef.current.geometry_id
-      const draft = manualCircleDraft
-      diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '', pointerId: null }
-      e.currentTarget.releasePointerCapture?.(e.pointerId)
-      if (center && draft?.center && Number.isFinite(Number(draft.radius)) && Number(draft.radius) >= 1) {
-        const circle = {
-          center: draft.center,
-          radius: Number(draft.radius),
-          geometry_id: String(draft.geometry_id || geometryId || makeManualGeometryId('circle', draft.center, draft.center)),
-          consumed: false,
-          type: manualCircleNextType,
-        }
-        const existing = manualCircles.findIndex((item) => String(item.geometry_id || '') === circle.geometry_id)
-        const nextCircles = existing >= 0 ? manualCircles.map((item, idx) => (idx === existing ? circle : item)) : [...manualCircles, circle]
-        const nextCircleIdx = existing >= 0 ? existing : nextCircles.length - 1
-        setManualCircleDraft(circle)
-        setManualCircleConsumed(false)
-        setManualCircles(nextCircles)
-        setManualCircleActiveIdx(nextCircleIdx)
+      const drag = diamCircleDragRef.current
+      if (drag.pointerId !== e.pointerId || e.type === 'pointerleave') return
+      const draft = e.type === 'pointerup' && drawnDiameterCircle(e, drag)
+      diamCircleDragRef.current = { dragging: false, pointerId: null }
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+      if (!draft || draft.radius < 1) {
+        setManualCircleDraft(drag.previousDraft)
+        setManualCircleSelected(drag.previousSelected)
+        setManualCircleConsumed(drag.previousConsumed)
+        return
       }
-      if (center && sessionId && imageId) {
-        const circle = {
-          center: draft?.center || center,
-          radius: Math.max(1, Number(draft?.radius) || 1),
-          geometry_id: String(draft?.geometry_id || geometryId || makeManualGeometryId('circle', draft?.center || center, draft?.center || center)),
-          consumed: false,
-          type: manualCircleNextType,
-        }
-        const existing = manualCircles.findIndex((item) => String(item.geometry_id || '') === circle.geometry_id)
-        const nextCircles = existing >= 0 ? manualCircles.map((item, idx) => (idx === existing ? circle : item)) : [...manualCircles, circle]
+      const circle = { ...draft, consumed: false, type: manualCircleNextType }
+      const center = circle.center
+      const existing = manualCircles.findIndex((item) => item.geometry_id === circle.geometry_id)
+      const nextCircles = existing >= 0 ? manualCircles.map((item, idx) => idx === existing ? circle : item) : [...manualCircles, circle]
+      const circleActiveIdx = existing >= 0 ? existing : nextCircles.length - 1
+      setManualCircleDraft(circle)
+      setManualCircleConsumed(false)
+      setManualCircles(nextCircles)
+      setManualCircleActiveIdx(circleActiveIdx)
+      setDiamParams(prev => ({ ...prev, circle_square_seed_mode: 'manual_circle', circle_square_seed_radius_px: Number(circle.radius.toFixed(1)) }))
+      if (sessionId && imageId) {
         const geometrySnapshot = {
           maskLines: manualMaskLines,
           directLines: manualDirectLines,
           circles: nextCircles,
           maskLineActiveIdx: manualMaskLineActiveIdx,
           directLineActiveIdx: manualDirectLineActiveIdx,
-          circleActiveIdx: existing >= 0 ? existing : nextCircles.length - 1,
+          circleActiveIdx,
         }
         const existingIdx = diamPoints.findIndex((p) => Math.hypot(Number(p.x) - Number(center.x), Number(p.y) - Number(center.y)) <= 2)
         if (existingIdx >= 0) {
@@ -6357,8 +6418,8 @@ export default function App() {
 
   function onPointReviewPointerMove(e) {
     if (!pointReviewPanRef.current.dragging) return
-    const dx = e.clientX - pointReviewPanRef.current.x
-    const dy = e.clientY - pointReviewPanRef.current.y
+    const dx = layoutPixels(e.clientX - pointReviewPanRef.current.x)
+    const dy = layoutPixels(e.clientY - pointReviewPanRef.current.y)
     pointReviewPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
     setPointReviewOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
     e.preventDefault()
@@ -6376,6 +6437,36 @@ export default function App() {
     setDiamPoints(points)
     setDiamActivePointIdx(Number.isFinite(Number(payload?.active_point_idx)) ? Number(payload.active_point_idx) : -1)
     applyDiameterGeometryPayload(payload?.geometry)
+  }
+
+  async function importDiameterCircleBatch(save = false) {
+    if (!sessionId || !imageId) return
+    const request = circleBatchPreview?.request
+    if (save && request?.image_id !== imageId) return
+    const requestId = ++circleBatchRequestRef.current
+    await withLoad('diamPoints', async () => {
+      try {
+        const payload = save ? request : {
+          session_id: sessionId,
+          image_id: imageId,
+          circles: JSON.parse(circleBatchText),
+        }
+        const response = await apiPost('/api/diameter-research/points/circles/batch', { ...payload, save, agent_run: editorRun || '' })
+        if (requestId !== circleBatchRequestRef.current) return
+        if (save) {
+          syncDiameterPointPayload(response)
+          if (!editorRun) setSavedCircleBatch({ imageId, circles: response.selected })
+          setCircleBatchPreview(null)
+          setCircleBatchText('')
+          toast('success', 'Lote de círculos', `${response.added_count} círculos nuevos guardados.`)
+        } else {
+          const url = b64ToDataUrl(response.preview_b64, response.preview_mime)
+          setCircleBatchPreview({ request: payload, url, count: response.new_count })
+        }
+      } catch (err) {
+        toast('error', 'Lote de círculos', errMsg(err))
+      }
+    })
   }
 
   function sanitizePointRef(point) {
@@ -6404,6 +6495,7 @@ export default function App() {
     return {
       center,
       radius,
+      ...(circle.agent_contacts?.length===4 ? {agent_contacts:circle.agent_contacts} : {}),
       geometry_id: String(circle?.geometry_id || circle?.circle_square_geometry_id || makeManualGeometryId('circle', center, center)),
       consumed: Boolean(circle?.consumed),
       type: String(circle?.type || circle?.circle_type || 'valid'),
@@ -6519,7 +6611,7 @@ export default function App() {
   async function syncDiameterPointsToServer(snapshot) {
     if (!sessionId || !imageId) return
     try {
-      await apiPost('/api/diameter-research/points/update', {
+      await apiPost('/api/diameter-research/points/update', { agent_run: editorRun || '',
         session_id: sessionId,
         action: 'replace',
         points: Array.isArray(snapshot?.points) ? snapshot.points : [],
@@ -6576,7 +6668,7 @@ export default function App() {
     }
     await withLoad('diamPoints', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/points/update', {
+        const res = await apiPost('/api/diameter-research/points/update', { agent_run: editorRun || '',
           session_id: sessionId,
           action: 'clear',
         })
@@ -6656,7 +6748,7 @@ export default function App() {
     }
     await withLoad('diamPoints', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/points/update', {
+        const res = await apiPost('/api/diameter-research/points/update', { agent_run: editorRun || '',
           session_id: sessionId,
           action,
           circle_type: action === 'add' ? manualCircleNextType : '',
@@ -6685,7 +6777,7 @@ export default function App() {
     if (!sid || !iid) return
     await withLoad('diamPoints', async () => {
       try {
-        const res = await apiGet(`/api/diameter-research/points/load?session_id=${encodeURIComponent(sid)}&image_id=${encodeURIComponent(iid)}`)
+        const res = await apiGet(`/api/diameter-research/points/load?session_id=${encodeURIComponent(sid)}&image_id=${encodeURIComponent(iid)}&agent_run=${encodeURIComponent(editorRun && iid===imageId ? editorRun : '')}`)
         syncDiameterPointPayload(res)
       } catch (err) {
         if (!silent) toast('warning', 'Diameter points', errMsg(err))
@@ -6697,7 +6789,7 @@ export default function App() {
     if (!sessionId || !imageId) return
     await withLoad('diamPoints', async () => {
       try {
-        const res = await apiPost('/api/diameter-research/points/save', {
+        const res = await apiPost('/api/diameter-research/points/save', { agent_run: editorRun || '',
           session_id: sessionId,
           image_id: imageId,
           geometry: buildDiameterGeometryPayload(diameterSnapshot()),
@@ -6829,8 +6921,8 @@ export default function App() {
 
   function onLocoDatasetPointerMove(e) {
     if (locoDatasetPanRef.current.dragging) {
-      const dx = e.clientX - locoDatasetPanRef.current.x
-      const dy = e.clientY - locoDatasetPanRef.current.y
+      const dx = layoutPixels(e.clientX - locoDatasetPanRef.current.x)
+      const dy = layoutPixels(e.clientY - locoDatasetPanRef.current.y)
       locoDatasetPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
       setLocoDatasetOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
       e.preventDefault()
@@ -6944,8 +7036,8 @@ export default function App() {
 
   function onLocoTestPointerMove(e) {
     if (locoTestPanRef.current.dragging) {
-      const dx = e.clientX - locoTestPanRef.current.x
-      const dy = e.clientY - locoTestPanRef.current.y
+      const dx = layoutPixels(e.clientX - locoTestPanRef.current.x)
+      const dy = layoutPixels(e.clientY - locoTestPanRef.current.y)
       locoTestPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
       setLocoTestOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
       e.preventDefault()
@@ -7065,8 +7157,8 @@ export default function App() {
       return
     }
     if (!locoModelPanRef.current.dragging) return
-    const dx = e.clientX - locoModelPanRef.current.x
-    const dy = e.clientY - locoModelPanRef.current.y
+    const dx = layoutPixels(e.clientX - locoModelPanRef.current.x)
+    const dy = layoutPixels(e.clientY - locoModelPanRef.current.y)
     locoModelPanRef.current = { dragging: true, x: e.clientX, y: e.clientY }
     setLocoModelOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
     e.preventDefault()
@@ -7906,7 +7998,7 @@ export default function App() {
     if (!imageId) return false
     const normalized = normalizeDiamCalibrationState(calibration)
     const line = calibrationLineFromState(normalized)
-    if (!line) {
+    if (!line && !normalized.direct_factor) {
       if (!silent) toast('warning', 'Calibracion', 'Dibuja la linea de escala antes de guardar.')
       return false
     }
@@ -8044,7 +8136,6 @@ export default function App() {
       try {
         const count = await saveTask()
         await refreshDiameterMeasurementSummary()
-        if (['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) await queryDiameterMeasurements()
         return count
       } catch (err) {
         toast('error', 'Mediciones internas', errMsg(err))
@@ -8079,21 +8170,6 @@ export default function App() {
     })
   }
 
-  async function queryDiameterMeasurements() {
-    await withLoad('diamAnalysis', async () => {
-      try {
-        const res = await apiPost('/api/diameter-research/measurements/query', {
-          ...diameterAnalysisFilters(),
-          unit: diamAnalysisUnit,
-          include_uncalibrated: diamAnalysisIncludeUncalibrated,
-        })
-        setDiamAnalysisResult(res?.payload || null)
-      } catch (err) {
-        toast('error', 'Analisis de diametros', errMsg(err))
-      }
-    })
-  }
-
   async function refreshDiameterAnalyses() {
     try {
       const res = await apiGet('/api/diameter-research/analysis/list')
@@ -8101,17 +8177,32 @@ export default function App() {
     } catch {}
   }
 
+  function onImageScaleSaved(iid, scale, count) {
+    if (iid === imageId) {
+      calibrationAutosaveRef.current.signature = calibrationSaveSignature(scale)
+      updateDiamCalibration(scale)
+    }
+    setDiamImageScales(prev => prev === undefined ? undefined : { ...prev, [iid]: scale })
+    if (Number.isInteger(count)) toast('success', 'Escala guardada', `Mediciones recalculadas para esta imagen: ${count}.`)
+    void refreshDiameterMeasurementSummary()
+  }
+
   async function refreshDiameterMeasurementSummary() {
+    const request = ++diamSummaryRequest.current
     await withLoad('diamMeasurementSummary', async () => {
       try {
         const res = await apiGet('/api/diameter-research/measurements/summary-by-image')
+        if (request !== diamSummaryRequest.current) return
         const next = {}
         ;(Array.isArray(res?.items) ? res.items : []).forEach((item) => {
           const imageId = String(item?.image_id || '')
           if (imageId) next[imageId] = item
         })
         setDiamMeasurementSummaryByImage(next)
+        setDiamImageScales(res?.calibrations)
       } catch (err) {
+        if (request !== diamSummaryRequest.current) return
+        setDiamImageScales(undefined)
         toast('error', 'Mediciones internas', errMsg(err))
       }
     })
@@ -9097,6 +9188,119 @@ export default function App() {
     })
   }
 
+  function focusHistogramCircle(batch, target) {
+    const circles = batch.geometry?.circles || []
+    const index = circles.findIndex(c => target.id ? c.geometry_id === target.id :
+      samePoint(c.center, target, 0.01) && Math.abs(c.radius - target.radius) < 0.01)
+    if (index < 0) throw new Error('El círculo de esta medición ya no está en la geometría editable de la imagen.')
+    const circle = sanitizeManualCircle(circles[index])
+    setManualCircleActiveIdx(index)
+    setManualCircleDraft(circle)
+    setManualCircleSelected(true)
+    setDiamActivePointIdx(batch.points.findIndex(p => samePoint(p, circle.center, 0.01)))
+    setHistogramFocus(circle)
+  }
+
+  useEffect(() => {
+    if (workspaceTab === 'diameter' && histogramFocus && centerDiameterViewerOnPoint(histogramFocus.center, histogramFocus.radius)) {
+      setHistogramFocus(null)
+      diameterStageRef.current?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [workspaceTab, histogramFocus, imageUrl, imageDims, diamStageSize])
+
+  async function openHistogramCircle(target) {
+    const iid = target.row.image_id
+    if (target.agentRun) {
+      const run = await apiGet('/api/agent/runs/' + encodeURIComponent(target.agentRun))
+      if (run.image_id !== iid) throw new Error('La ejecución no corresponde a esta imagen.')
+      await openAgentDiameter(run, null, target)
+      return
+    }
+    const sid = await ensureSessionReady()
+    if (!sid || ((imageId !== iid || !imageUrl) && await loadSavedImage(iid) !== iid)) throw new Error('No se pudo abrir la imagen de la medición.')
+    const batch = await apiGet('/api/diameter-research/points/load?' + new URLSearchParams({ session_id: sid, image_id: iid }))
+    syncDiameterPointPayload(batch)
+    focusHistogramCircle(batch, target)
+    setSavedCircleBatch(agentOnly ? { imageId: iid, standardEditor: true } : null)
+    setUseAgentMask(false)
+    selectDiameterDrawingTool('circle_square_mask_diameter')
+    navigateToWorkspace(agentOnly ? 'agent' : 'detection', agentOnly ? 'agentDiameter' : 'diameter')
+  }
+
+  async function openAgentDiameter(run, contacts, target = null) {
+    const sid = await ensureSessionReady()
+    if (!sid) throw new Error('No se pudo abrir la sesión de medición.')
+    if (imageId !== run.image_id || !imageUrl) {
+      const loaded = await loadSavedImage(run.image_id)
+      if (loaded !== run.image_id) throw new Error('No se pudo cargar la imagen de la ejecución.')
+    }
+    const batch = await apiPost('/api/diameter-research/agent-editor/'+run.run_id, {
+      session_id: sid, image_id: run.image_id,
+      contacts: contacts ?? await detectCircleContacts(API_BASE + '/api/agent/runs/' + run.run_id, run, run.circles),
+    })
+    clearDiameterLocalState()
+    syncDiameterPointPayload(batch)
+    if (target) focusHistogramCircle(batch, target)
+    setSavedCircleBatch({ imageId: run.image_id, projectId: activeProjectId, agentRun: run.run_id,
+      width: run.width, height: run.height })
+    setUseAgentMask(true)
+    selectDiameterDrawingTool('circle_square_mask_diameter')
+    navigateToWorkspace('agent', 'agentDiameter')
+  }
+
+  useEffect(() => {
+    if (savedCircleBatch?.standardEditor && !agentDiameterTab) setSavedCircleBatch(null)
+    if (!savedCircleBatch?.agentRun || editorRun) return
+    setSavedCircleBatch(null)
+    setUseAgentMask(false)
+    clearDiameterLocalState()
+    if (imageId && sessionId) loadDiameterPoints(sessionId, imageId, {silent:true})
+  }, [editorRun, savedCircleBatch?.agentRun, savedCircleBatch?.standardEditor, agentDiameterTab])
+
+  async function updateAgentGeometry(circles, points = diamPoints) {
+    const payload = await apiPost('/api/diameter-research/points/update', {
+      session_id: sessionId, image_id: imageId, agent_run: editorRun, action:'replace',
+      points, active_index:diamActivePointIdx, geometry:buildDiameterGeometryPayload({circles}),
+    })
+    rememberDiameterManualState()
+    syncDiameterPointPayload(payload)
+  }
+
+  async function markPendingEdges() {
+    await withLoad('diamPoints', async () => {
+      try {
+        const run = await apiGet('/api/agent/runs/' + editorRun)
+        const points = await detectCircleContacts(API_BASE+'/api/agent/runs/'+editorRun, run,
+          pendingEdges.map(c=>({id:c.geometry_id, x:c.center.x, y:c.center.y, radius_px:c.radius})))
+        const latest = await apiPost('/api/diameter-research/agent-editor/'+editorRun+'/contacts',{
+          session_id:sessionId,image_id:imageId,contacts:points,
+        })
+        syncDiameterPointPayload(latest)
+        const count=latest.geometry.circles.filter(c=>c.agent_contacts?.length!==4).length
+        toast(count?'warning':'success','Bordes', `${latest.marked} círculos marcados · ${count} pendientes.`)
+      } catch(err) { toast('error','Bordes',errMsg(err)) }
+    })
+  }
+
+  async function editAgentCircle(event) {
+    event.preventDefault()
+    const fields = new FormData(event.currentTarget)
+    const x=Number(fields.get('x')), y=Number(fields.get('y')), radius=Number(fields.get('radius'))
+    const old = manualCircles[manualCircleActiveIdx]
+    if (!old || ![x,y,radius].every(Number.isFinite) || radius<1 ||
+        Math.min(x,y,imageDims.w-1-x,imageDims.h-1-y)<radius) {
+      toast('warning','Círculo','El círculo debe quedar dentro de la imagen.'); return
+    }
+    if (x===old.center.x && y===old.center.y && radius===old.radius) return
+    await withLoad('diamPoints', async()=>{
+      try {
+        const circles=manualCircles.map(c=>c===old ? {...c,center:{x,y},radius,agent_contacts:[],consumed:false} : c)
+        await updateAgentGeometry(circles,diamPoints.map(p=>samePoint(p,old.center,.001)?{...p,x,y}:p))
+        setDiamResults(prev=>prev.filter(r=>resultIdentity(r).geometryId!==old.geometry_id))
+      } catch(err) { toast('error','Círculo',errMsg(err)) }
+    })
+  }
+
   async function measureLocoModelAccepted() {
     const accepted = Array.isArray(locoModelResult?.accepted) ? locoModelResult.accepted : []
     const stage = String(locoModelResult?.summary?.result_stage || '')
@@ -9149,6 +9353,7 @@ export default function App() {
             pixel_distance: calibration.pixel_distance ?? 0,
             unit_per_px: calibration.unit_per_px ?? calibration.nm_per_px ?? 0,
             unit: calibration.unit ?? DEFAULT_DIAM_CALIBRATION.unit,
+            direct_factor: !!calibration.direct_factor,
             line_x1: calibration.line_x1 ?? null,
             line_y1: calibration.line_y1 ?? null,
             line_x2: calibration.line_x2 ?? null,
@@ -9166,7 +9371,7 @@ export default function App() {
 
   useEffect(() => {
     const line = calibrationLineFromState(diamCalibration)
-    if (!imageId || !line || !(Number(diamCalibration.known_value || 0) > 0)) return undefined
+    if (!imageId || (!line && !diamCalibration.direct_factor) || !(Number(diamCalibration.known_value || 0) > 0)) return undefined
     const signature = calibrationSaveSignature(diamCalibration)
     if (signature === calibrationAutosaveRef.current.signature) return undefined
     if (calibrationAutosaveRef.current.timer) {
@@ -9292,13 +9497,14 @@ export default function App() {
 
   function buildCircleBatch(circles, activeOnly = false) {
     const selected = (Array.isArray(circles) ? circles : [])
-      .filter((circle) => circle?.center && Number.isFinite(Number(circle.radius)))
+      .filter((circle) => circle?.center && Number.isFinite(Number(circle.radius)) && (!editorRun || circle.agent_contacts?.length===4))
     if (!selected.length) return null
     if (activeOnly && diamMethodId !== 'circle_square_mask_diameter') return null
     const params = diameterParamsPayload()
     params.circle_square_seed_mode = 'manual_circle'
     params.circle_square_circles_by_point = selected.map((circle, idx) => ({
       circle_square_seed_radius_px: Math.max(1, Number(circle.radius)),
+      ...(editorRun ? {agent_contacts_xy:circle.agent_contacts.map(p=>[p.x,p.y])} : {}),
       circle_square_center_x: Number(circle.center.x),
       circle_square_center_y: Number(circle.center.y),
       circle_square_geometry_id: String(circle.geometry_id || `circle_square_${idx}`),
@@ -9444,19 +9650,21 @@ export default function App() {
       batches.push(circleBatch)
       excludedCenters.push(...circleBatch.geometry_centers)
     }
-    const pointBatch = buildAutomaticPointBatch(excludedCenters, false)
+    const pointBatch = !editorRun && buildAutomaticPointBatch(excludedCenters, false)
     if (pointBatch) batches.push(pointBatch)
     return batches
   }
 
-  async function runDiameterResearch(activeOnly) {
+  async function runDiameterResearch(activeOnly, selectedCircles = null) {
     if (!sessionId || !imageId || !imageUrl) {
       toast('warning', 'Medicion de Diametros', 'Carga una imagen primero.')
       return
     }
     await flushDraftIfNeeded()
     const scribble = currentScribbleB64()
-    const batches = buildDiameterRunBatches(Boolean(activeOnly))
+    const batches = selectedCircles
+      ? [buildCircleBatch(selectedCircles)].filter(Boolean)
+      : buildDiameterRunBatches(Boolean(activeOnly))
     if (!batches.length) {
       if (diamMethodId === 'circle_square_mask_diameter') {
         setDiamViewerMode('circle')
@@ -9470,7 +9678,7 @@ export default function App() {
       }
       return
     }
-    const hideManualCircleAfterRun = batches.some((batch) => batch.method_id === 'circle_square_mask_diameter')
+    const hideManualCircleAfterRun = !editorRun && !selectedCircles && batches.some((batch) => batch.method_id === 'circle_square_mask_diameter')
     if (hideManualCircleAfterRun) consumeDiameterManualCircle()
     await withLoad('diamRun', async () => {
       try {
@@ -9509,14 +9717,15 @@ export default function App() {
         await refreshDiameterRuns(imageId, { silent: true })
         let savedMeasurementCount = 0
         try {
-          await persistCalibration(diamCalibrationRef.current, { silent: true })
-          for (const res of responses) {
-            if (res?.run_id) {
-              savedMeasurementCount += Number(await saveCurrentDiameterMeasurements(res.run_id, { silent: true }) || 0)
+          if (!selectedCircles) {
+            await persistCalibration(diamCalibrationRef.current, { silent: true })
+            for (const res of responses) {
+              if (res?.run_id) {
+                savedMeasurementCount += Number(await saveCurrentDiameterMeasurements(res.run_id, { silent: true }) || 0)
+              }
             }
+            await refreshDiameterMeasurementSummary()
           }
-          await refreshDiameterMeasurementSummary()
-          if (['diameterAnalysisSelect', 'diameterAnalysisHistogram'].includes(workspaceTab)) await queryDiameterMeasurements()
         } catch (err) {
           toast('warning', 'Mediciones internas', `El run se completo, pero no se pudieron guardar mediciones internas: ${errMsg(err)}`)
         }
@@ -9556,13 +9765,9 @@ export default function App() {
   function resultPointForReview(result) {
     const r = result || {}
     const idx = Number(r.point_index)
-    if (Number.isInteger(idx) && idx >= 0 && idx < diamPoints.length) {
-      const p = diamPoints[idx]
-      return { x: Number(p.x), y: Number(p.y), point_index: idx }
-    }
     const original = Array.isArray(r.original_xy) ? r.original_xy : null
-    const x = original ? Number(original[0]) : Number(r.x)
-    const y = original ? Number(original[1]) : Number(r.y)
+    const x = Number(original?.[0] ?? r.x ?? diamPoints[idx]?.x ?? NaN)
+    const y = Number(original?.[1] ?? r.y ?? diamPoints[idx]?.y ?? NaN)
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
     return { x, y, point_index: Number.isInteger(idx) ? idx : 0 }
   }
@@ -9649,8 +9854,9 @@ export default function App() {
       scale_factor: r.scale_factor == null ? null : Number(r.scale_factor),
       small_diameter_suspect: Boolean(r.small_diameter_suspect),
     })
-    if (Number.isInteger(pointIdx) && pointIdx >= 0 && pointIdx < diamPoints.length) {
-      void updateDiameterPoints('set_active', { active_index: pointIdx })
+    const activeIdx = samePoint(diamPoints[pointIdx], point, 0.01) ? pointIdx : diamPoints.findIndex(p => samePoint(p, point, 0.01))
+    if (activeIdx >= 0) {
+      void updateDiameterPoints('set_active', { active_index: activeIdx })
     }
     const existing = validationCases.find((c) => samePoint(c?.point, point))
     if (existing) {
@@ -9686,13 +9892,15 @@ export default function App() {
     selectDiameterResultForReview(result, { silent: true })
     setPointReviewOpen(false)
     setWorkspaceTab('diameter')
-    setActiveGroup('detection')
-    setActiveTab('diameter')
+    setActiveGroup(editorRun ? 'agent' : 'detection')
+    setActiveTab(editorRun ? 'agentDiameter' : 'diameter')
     if (diamMethodId === 'circle_square_mask_diameter') setDiamViewerMode('circle')
-    const focused = centerDiameterViewerOnPoint(point, { preferredZoom: 2 })
-    if (!focused) {
-      requestAnimationFrame(() => centerDiameterViewerOnPoint(point, { preferredZoom: 2 }))
+    const focusResult = () => {
+      if (!centerDiameterViewerOnPoint(point, result.circle_radius_px)) return false
+      diameterStageRef.current?.scrollIntoView({ block: 'nearest' })
+      return true
     }
+    if (!focusResult()) requestAnimationFrame(focusResult)
   }
 
   function manualLineFromForm(form = validationForm) {
@@ -9899,8 +10107,8 @@ export default function App() {
     // Position canvas so its center is at the mouse cursor relative to the stage
     const stageRect = stage.getBoundingClientRect()
     const halfCss = cssSize / 2
-    canvas.style.left = `${brushMousePos.x - stageRect.left - halfCss}px`
-    canvas.style.top = `${brushMousePos.y - stageRect.top - halfCss}px`
+    canvas.style.left = `${layoutPixels(brushMousePos.x - stageRect.left) - halfCss}px`
+    canvas.style.top = `${layoutPixels(brushMousePos.y - stageRect.top) - halfCss}px`
   }, [brushMousePos, editorRenderMetrics, annotBrushPx, cursorColor])
 
   const diameterRenderMetrics = useMemo(
@@ -10229,6 +10437,8 @@ export default function App() {
     return Math.round((100 * batchProgress.done) / batchProgress.total)
   }, [batchProgress])
   const transferAllSelected = transferCatalog.length > 0 && transferCatalog.every((item) => !!transferSelection[item.key])
+  const projectQuery = projectSearch.trim().toLocaleLowerCase()
+  const visibleTransferProjects = projects.filter(p => [p.name, p.project_id].some(value => value?.toLocaleLowerCase().includes(projectQuery)))
   const transferSelectedProjects = projects.filter((project) => transferProjectIds.includes(project.project_id))
   const transferAdvancedActive = transferMode === 'project' && transferExportMode === 'advanced'
   const transferAdvancedSelectedCategories = projects.flatMap((project) => {
@@ -10240,25 +10450,28 @@ export default function App() {
   const transferAdvancedCategoryCount = transferAdvancedSelectedCategories.length
   const transferAdvancedFiles = transferAdvancedSelectedCategories.reduce((total, item) => total + Number(item.file_count || 0), 0)
   const transferAdvancedSize = transferAdvancedSelectedCategories.reduce((total, item) => total + Number(item.size_bytes || 0), 0)
+  const exportCategories = transferMode === 'full' ? transferCatalog.filter(item => transferSelection[item.key]) : transferCatalog
   const transferSelectedSize = transferAdvancedActive
     ? transferAdvancedSize
-    : transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.size_bytes || 0) : 0), 0)
+    : exportCategories.reduce((total, item) => total + Number(item.size_bytes || 0), 0)
   const transferSelectedFiles = transferAdvancedActive
     ? transferAdvancedFiles
-    : transferCatalog.reduce((total, item) => total + (transferSelection[item.key] ? Number(item.file_count || 0) : 0), 0)
+    : exportCategories.reduce((total, item) => total + Number(item.file_count || 0), 0)
   const transferHasSelection = transferAdvancedActive
     ? transferAdvancedSelectedCategories.length > 0
-    : transferCatalog.some((item) => transferSelection[item.key])
+    : exportCategories.length > 0 && (transferMode === 'full' || transferSelectedProjects.length > 0)
   const transferImportProjects = Array.isArray(transferImportInspection?.summary?.projects) ? transferImportInspection.summary.projects : []
   const transferImportNeedsProjectSelection = transferImportProjects.length > 0 && transferImportProjectIds.length === 0
   const transferImportBusy = loading.transferApply || !!transferImportJob || ['queued', 'running'].includes(String(transferImportProgress?.status || '')) || transferImportRefreshing
   const transferImportTotal = Number(transferImportProgress?.total_files || 0)
   const transferImportProcessed = Number(transferImportProgress?.processed_files || 0)
   const transferImportPct = transferImportTotal > 0 ? Math.min(100, Math.round((100 * transferImportProcessed) / transferImportTotal)) : 0
-  const diamAnalysisRows = Array.isArray(diamAnalysisResult?.items) ? diamAnalysisResult.items : []
-  const diamAnalysisValues = diamAnalysisRows.map((row) => Number(row.diameter_value)).filter((value) => Number.isFinite(value))
-  const diamAnalysisGlobalStats = diamAnalysisResult?.global_metrics?.stats || {}
-  const diamAnalysisImageMetrics = Array.isArray(diamAnalysisResult?.image_metrics) ? diamAnalysisResult.image_metrics : []
+  const currentDiameterAnalysis = diamAnalysisResult?.unit === diamAnalysisUnit ? diamAnalysisResult : null
+  const diamAnalysisRows = currentDiameterAnalysis?.items || []
+  const graphedDiameterRows = diamAnalysisRows.filter(row => Number.isFinite(row.diameter_value))
+  const diamAnalysisValues = graphedDiameterRows.map(row => row.diameter_value)
+  const diamAnalysisGlobalStats = currentDiameterAnalysis?.global_metrics?.stats || {}
+  const diamAnalysisImageMetrics = currentDiameterAnalysis?.image_metrics || []
   const scribbleTutorialChecklist = [
     ['Corregir semilla con Goma', scribbleTutorialExercise.erase_seed_done],
     ['Agrandar pincel', scribbleTutorialExercise.brush_grow_done],
@@ -10513,22 +10726,33 @@ export default function App() {
     }
   }
 
-  async function openProjectImageZoom(image, initialZoom = 1) {
+  async function openProjectImageZoom(image, initialZoom = 1, reviewScale = false, savedScale) {
     const imageIdValue = String(image?.image_id || '').trim()
     const initialUrl = projectImagePreviewUrl(image)
     if (!imageIdValue && !initialUrl) {
       toast('warning', 'Imagenes y tags', 'No hay imagen disponible para ampliar.')
       return
     }
+    const project = reviewScale && image?.project_ids?.[0]
+    const photoUrl = project && `${API_BASE}/api/agent-training/${encodeURIComponent(project)}/circulos/photo/${encodeURIComponent(imageIdValue)}`
     setProjectImageZoom({
       image_id: imageIdValue,
       image_name: String(image?.image_name || image?.image_id || 'Imagen'),
       source_mtime: String(image?.source_mtime || image?.updated_at || ''),
-      url: initialUrl,
+      url: photoUrl || initialUrl,
+      reviewScale,
+      calibration: savedScale !== undefined ? savedScale : reviewScale && diamImageScales ? diamImageScales[imageIdValue] || null : undefined,
       zoom: initialZoom,
-      loading: !!imageIdValue,
+      loading: !!imageIdValue && !photoUrl,
     })
     if (!imageIdValue) return
+    if (reviewScale && !diamImageScales && savedScale === undefined) {
+      const update = fields => setProjectImageZoom(prev => prev?.reviewScale && prev.image_id === imageIdValue ? { ...prev, ...fields } : prev)
+      apiGet('/api/diameter-research/calibration/load?image_id=' + encodeURIComponent(imageIdValue))
+        .then(res => update({ calibration: res.calibration || null }))
+        .catch(err => update({ scaleError: errMsg(err) }))
+    }
+    if (photoUrl) return
     try {
       const full = await fetchProjectImagePreview(imageIdValue)
       setProjectImageZoom((prev) => prev && prev.image_id === imageIdValue ? { ...prev, ...full, loading: false } : prev)
@@ -11188,7 +11412,9 @@ export default function App() {
         </div>
       ) : null}
 
-      {projectImageZoom ? (
+      {projectImageZoom?.reviewScale ? (
+        <ScalePhotoDialog key={projectImageZoom.image_id} photo={projectImageZoom} onSaved={onImageScaleSaved} onClose={() => setProjectImageZoom(null)} />
+      ) : projectImageZoom ? (
         <div className="image-preview-modal" role="dialog" aria-modal="true" onDoubleClick={() => setProjectImageZoom(null)}>
           <div className="image-preview-dialog project-image-zoom-dialog" onDoubleClick={(e) => e.stopPropagation()}>
             <div className="point-review-head">
@@ -11224,16 +11450,15 @@ export default function App() {
       <div className="app-layout">
         <Navigation
           activeGroup={activeGroup}
-          activeTab={activeTab}
+          agentOnly={agentOnly}
           onGroupChange={handleGroupChange}
-          onTabChange={handleTabChange}
           forceExpanded={tutorialSidebarForcedOpen}
         />
         <div className="content-area">
           {/* Tab strip for Level 2 sub-tabs (compact horizontal boxes) */}
           {(() => {
             const group = GROUPS.find((g) => g.key === activeGroup)
-            if (!group) return null
+            if (!group || activeGroup === 'configuration') return null
             return (
               <div className="tab-strip" data-tour={`tab-strip-${activeGroup}`}>
                 {group.tabs.map((t) => (
@@ -11250,8 +11475,10 @@ export default function App() {
             )
           })()}
 
-          <div className={`layout ${workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'layout-wide' : ''}`}>
-        <aside className={`left ${workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'hidden-panel' : ''}`} data-tour={`workspace-sidebar-${workspaceTab}`}>
+          {showAgentTools && <AgentMode preferredMask={preferredAgentMask} enterEditor={agentDiameterTab} onMeasure={openAgentDiameter} handIcon={<ToolIcon name="hand" />} key={activeProjectId} project={activeProject} images={savedImages} activeImageId={imageId} />}
+          {activeGroup === 'agentTraining' && <AgentTraining key={activeProjectId} tab={activeTab} project={activeProject} projects={projects} images={savedImages} />}
+          <div style={showAgentTools || activeGroup === 'agentTraining' ? { display: 'none' } : undefined} className={`layout ${workspaceTab === 'projectTransfer' || workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'layout-wide' : ''}`}>
+        <aside className={`left ${workspaceTab === 'projectTransfer' || workspaceTab === 'scribbleModelManager' || workspaceTab === 'locoModelManager' ? 'hidden-panel' : ''}`} data-tour={`workspace-sidebar-${workspaceTab}`}>
           {workspaceTab === 'projectSelect' ? (
             <>
               <section className="card">
@@ -11403,12 +11630,26 @@ export default function App() {
             />
           ) : workspaceTab === 'workbench' ? (
             <>
-              <div className="side-tabs">
+              {agentMaskTab ? <AgentMaskPanel key={activeProjectId + ':' + imageId} project={activeProject}
+                images={savedImages} imageId={imageId} loadImage={loadSavedImage} loading={loading.libraryLoad}
+                getScribble={currentScribbleB64} addToEditor={async b64 => {
+                  const before = captureAnnotSnapshot()
+                  const changed = await mergeScribbleMapFromB64(b64, true)
+                  if (before && changed) {
+                    setAnnotHistory(history => [...history, before].slice(-40))
+                    setAnnotFuture([])
+                    markScribbleDirty()
+                  }
+                  toast('success', 'Editor Scribble', changed + ' píxeles añadidos en zonas sin pintar.')
+                }} onDetect={mask => {
+                  setPreferredAgentMask(mask)
+                  navigateToWorkspace('agent', 'agentMode')
+                }} /> : <div className="side-tabs">
                 <button data-tour="workbench-panel-tab-image" className={workbenchPanelTab === 'image' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('image')}>Imagen</button>
                 <button data-tour="workbench-panel-tab-editor" className={workbenchPanelTab === 'editor' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('editor')}>Scribble</button>
                 <button data-tour="workbench-panel-tab-experiments" className={workbenchPanelTab === 'experiments' ? 'active' : ''} onClick={() => setWorkbenchPanelTab('experiments')}>Experimentos</button>
-              </div>
-              {workbenchPanelTab === 'image' ? (
+              </div>}
+              {!agentMaskTab && workbenchPanelTab === 'image' ? (
                 <>
               <section className="card">
                 <h2>Imagen activa</h2>
@@ -11503,7 +11744,7 @@ export default function App() {
                 )}
               </section>
                 </>
-              ) : workbenchPanelTab === 'editor' ? (
+              ) : agentMaskTab || workbenchPanelTab === 'editor' ? (
                 <>
                   <section className="card scribble-controls-card">
                     <h2>Editor de scribbles</h2>
@@ -11792,8 +12033,12 @@ export default function App() {
                 </p>
                 <label className="field">
                   <span>Run de soporte</span>
-                  <select value={diamPriorRunId} onChange={(e) => setDiamPriorRunId(e.target.value)} disabled={!imageId}>
+                  <select value={diamPriorRunId} onChange={(e) => {
+                    setUseAgentMask(e.target.value === agentPriorId)
+                    if (e.target.value !== agentPriorId) setDiamPriorRunId(e.target.value)
+                  }} disabled={!imageId || !!editorRun}>
                     <option value="latest">ultimo run S/A disponible</option>
+                    {agentPriorId && <option value={agentPriorId}>Máscara de la ejecución del agente</option>}
                     {nextStepRuns.map((r, idx) => (
                       <option key={r.run_id} value={r.run_id}>
                         {idx + 1}. {r.experiment_id}{r.profile_name ? ` (${r.profile_name})` : ''} | {reviewLabel(reviewByRun[r.run_id]?.decision)} | {r.created_at || r.run_id}
@@ -11802,16 +12047,29 @@ export default function App() {
                   </select>
                 </label>
                 <div className="kpi">
-                  Soporte elegido: <strong>{selectedPriorRun ? `${selectedPriorRun.experiment_id}${selectedPriorRun.profile_name ? ` (${selectedPriorRun.profile_name})` : ''}` : 'sin runs S/A'}</strong>
+                  Soporte elegido: <strong>{agentMaskActive ? 'Máscara del agente' : selectedPriorRun ? `${selectedPriorRun.experiment_id}${selectedPriorRun.profile_name ? ` (${selectedPriorRun.profile_name})` : ''}` : 'sin runs S/A'}</strong>
                 </div>
                 <div className="inline">
                   <button onClick={() => refreshResults()} disabled={!imageId || loading.listResults}>Refrescar soporte</button>
-                  <button onClick={() => setDiamPriorRunId('latest')} disabled={!imageId || diamPriorRunId === 'latest'}>Usar ultimo</button>
+                  <button onClick={() => { setUseAgentMask(false); setDiamPriorRunId('latest') }} disabled={!!editorRun || !imageId || diamPriorRunId === 'latest'}>Usar ultimo</button>
                 </div>
+                {editorRun && <section className="loco-lab-section"><h3>Bordes del agente</h3>
+                  <p className="small">{manualCircles.length-pendingEdges.length} círculos con cuatro bordes · {pendingEdges.length} pendientes</p>
+                  <button onClick={markPendingEdges} disabled={loading.diamPoints || loading.diamRun || !pendingEdges.length}>Marcar bordes pendientes</button>
+                  {manualCircles[manualCircleActiveIdx] && <form className="diam-param-grid" key={JSON.stringify([manualCircleActiveIdx,manualCircles[manualCircleActiveIdx].center,manualCircles[manualCircleActiveIdx].radius])} onSubmit={editAgentCircle}>
+                    {['x','y','radius'].map(k=><label className="field" key={k}><span>{k==='radius'?'Radio (px)':'Centro '+k.toUpperCase()}</span>
+                      <input required type="number" name={k} step="any" min={k==='radius'?1:0} defaultValue={k==='radius'?manualCircles[manualCircleActiveIdx].radius:manualCircles[manualCircleActiveIdx].center[k]}/></label>)}
+                    <button disabled={loading.diamPoints || loading.diamRun}>Aplicar al círculo</button>
+                    <button type="button" disabled={loading.diamPoints || loading.diamRun} onClick={()=>clearDiameterManualCircle()}>Eliminar círculo seleccionado</button>
+                  </form>}
+                </section>}
                 <div className="inline">
-                  <button className="primary" onClick={() => runDiameterResearch(true)} disabled={!imageId || !diamPoints.length || loading.diamRun}>Run active point</button>
-                  <button className="primary" onClick={() => runDiameterResearch(false)} disabled={!imageId || !diamPoints.length || loading.diamRun}>Run all points</button>
+                  <button className="primary" onClick={() => runDiameterResearch(true)} disabled={!imageId || !diamPoints.length || loading.diamRun || (editorRun && diamMethodId==='circle_square_mask_diameter' && manualCircles[manualCircleActiveIdx]?.agent_contacts?.length!==4)}>{editorRun?'Medir selección':'Run active point'}</button>
+                  <button className="primary" onClick={() => runDiameterResearch(false)} disabled={!imageId || !diamPoints.length || loading.diamRun}>{editorRun?'Medir geometrías listas':'Run all points'}</button>
                 </div>
+                {agentPriorId && !editorRun && savedBatchCircles?.length > 0 && <button className="primary" onClick={() => runDiameterResearch(false, savedBatchCircles)} disabled={loading.diamRun}>
+                  Medir círculos del agente ({savedBatchCircles.length})
+                </button>}
                 <div className="inline">
                   <button onClick={() => refreshDiameterRuns()} disabled={!imageId || loading.diamList}>Refresh runs</button>
                   <button onClick={exportDiameterReport} disabled={!imageId || loading.diamExport}>Export report</button>
@@ -11832,6 +12090,39 @@ export default function App() {
                   </button>
                 </div>
                 <button onClick={saveDiameterPoints} disabled={!imageId || loading.diamPoints}>Guardar puntos</button>
+                {imageId ? (
+                  <details className="circle-batch-panel">
+                    <summary>Importar círculos</summary>
+                    <label className="field">
+                      <span>Coordenadas del lote en píxeles</span>
+                      <textarea
+                        value={circleBatchText}
+                        rows={4}
+                        placeholder={'[{"x":120,"y":85,"radius_px":5}]'}
+                        onChange={(e) => {
+                          setCircleBatchText(e.target.value)
+                          setCircleBatchPreview(null)
+                        }}
+                        disabled={loading.diamPoints}
+                      />
+                    </label>
+                    <div className="inline">
+                      <button onClick={() => importDiameterCircleBatch()} disabled={!circleBatchText.trim() || loading.diamPoints}>Previsualizar lote</button>
+                      <button onClick={() => importDiameterCircleBatch(true)} disabled={!circleBatchPreview || loading.diamPoints}>Guardar lote</button>
+                      {!editorRun && savedBatchCircles?.length > 0 ? (
+                        <button onClick={() => runDiameterResearch(false, savedBatchCircles)} disabled={loading.diamRun}>
+                          Medir lote ({savedBatchCircles.length})
+                        </button>
+                      ) : null}
+                    </div>
+                    {circleBatchPreview ? (
+                      <>
+                        <p className="small">{circleBatchPreview.count} círculos nuevos</p>
+                        <img src={circleBatchPreview.url} alt="Vista previa de los círculos del lote" style={{ maxWidth: '100%' }} />
+                      </>
+                    ) : null}
+                  </details>
+                ) : null}
                 {!diamPoints.length ? (
                   <div className="placeholder small">Sin puntos.</div>
                 ) : (
@@ -12973,21 +13264,7 @@ export default function App() {
                 </section>
               ) : null}
             </>
-          ) : workspaceTab === 'projectTransfer' ? (
-            <>
-              <section className="card">
-                <h2>Configuracion</h2>
-                <p className="small">Transfiere imagenes, scribbles, datasets y modelos entre maquinas. Los resultados de deteccion y medicion no se incluyen.</p>
-              </section>
-              <section className="card">
-                <h2>Resumen seleccionado</h2>
-                <div className="kpi">Categorias: <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></div>
-                <div className="kpi">Archivos: <strong>{transferSelectedFiles}</strong></div>
-                <div className="kpi">Tamano estimado: <strong>{formatBytes(transferSelectedSize)}</strong></div>
-                <button onClick={refreshTransferCatalog} disabled={loading.transferCatalog || transferImportBusy}>Actualizar tamanos</button>
-              </section>
-            </>
-          ) : (
+          ) : workspaceTab === 'projectTransfer' ? null : (
             <>
               <section className="card">
                 <h2>Entrenamiento</h2>
@@ -13122,6 +13399,9 @@ export default function App() {
                                   ) : <span className="saved-image-empty" />}
                                   <strong>{img.image_name || img.image_id}</strong>
                                 </div>
+                                {img.has_scribble_draft ? (
+                                  <span className="small">Scribble · Fibra {img.draft_n_fg || 0} · Halo {img.draft_n_halo || 0} · Fondo {img.draft_n_bg || 0} px</span>
+                                ) : null}
                               </td>
                               <td>{img.source_mtime || img.updated_at || '-'}</td>
                               <td>
@@ -13147,6 +13427,11 @@ export default function App() {
                               <td>
                                 <div className="inline">
                                   <button onClick={() => openProjectImageEditor(img)}>Editar tags</button>
+                                  {img.has_scribble_draft ? (
+                                    <button onClick={() => loadSavedImage(img.image_id, img.scribble_origin, true)} disabled={loading.libraryLoad}>
+                                      Abrir scribble
+                                    </button>
+                                  ) : null}
                                 </div>
                               </td>
                             </tr>
@@ -13368,6 +13653,10 @@ export default function App() {
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={() => zoomDiameterBy(0.84)} disabled={!imageUrl} title="Zoom menos">-</button>
               <button className="icon-tool" onClick={() => zoomDiameterBy(1.2)} disabled={!imageUrl} title="Zoom mas">+</button>
+              <button className="icon-tool" disabled={!manualCircles[manualCircleActiveIdx]} onClick={() => {
+                const c = manualCircles[manualCircleActiveIdx]
+                centerDiameterViewerOnPoint(c.center, c.radius)
+              }}>Ampliar círculo</button>
               <button className="icon-tool" onClick={resetDiameterView} disabled={!imageUrl} title="Reiniciar vista">Reiniciar</button>
               <span className="zoom-chip">{Math.round(diamViewerZoom * 100)}%</span>
               <span className="toolbar-sep" />
@@ -13398,6 +13687,8 @@ export default function App() {
                   <div
                     className="diameter-content"
                     style={{
+                      '--diam-screen-px': `${1 / (diameterRenderMetrics?.scale || 1)}px`,
+                      '--diam-inverse-scale': 1 / (diameterRenderMetrics?.scale || 1),
                       width: `${Math.max(1, imageDims.w)}px`,
                       height: `${Math.max(1, imageDims.h)}px`,
                       transform: diameterRenderMetrics
@@ -13486,6 +13777,8 @@ export default function App() {
                               r={circle.radius}
                             />
                           ))}
+                          {editorRun && diameterManualCirclePreviews.flatMap(c=>(c.agent_contacts || []).map((p,i)=>
+                            <circle key={c.geometry_id+'-contact-'+i} className="diam-agent-contact" cx={p.x} cy={p.y} r={2.8 / (diameterRenderMetrics?.scale || 1)} />))}
                         </svg>
                       ) : null}
                       {diameterManualCirclePreviews.map((circle) => (
@@ -13513,7 +13806,8 @@ export default function App() {
                             setManualCircleActiveIdx(Number(circle.idx))
                             if (Number(circle.idx) >= 0) setManualCircleDraft(manualCircles[Number(circle.idx)] || null)
                           }}
-                          title="Circulo manual seleccionado. Suprimir/Delete lo borra."
+                          onDoubleClick={() => centerDiameterViewerOnPoint(circle.center, circle.radius)}
+                          title="Doble clic para ampliar el círculo. Supr lo elimina."
                           aria-label="Seleccionar circulo manual"
                         />
                       ))}
@@ -13535,7 +13829,11 @@ export default function App() {
                           onClick={(e) => {
                             e.stopPropagation()
                           }}
-                          title={`Punto ${idx + 1}`}
+                          onDoubleClick={() => {
+                            const circle = diameterManualCirclePreviews.find(c => samePoint(c.center, p, 0.01))
+                            centerDiameterViewerOnPoint(p, circle?.radius)
+                          }}
+                          title={`Punto ${idx + 1} · Doble clic para ampliar`}
                         >
                           <span className="diam-marker-dot" />
                           <span className="diam-marker-label">{idx + 1}</span>
@@ -13579,6 +13877,9 @@ export default function App() {
 
             <div className="diam-results">
               <h2>Resultados por punto</h2>
+              {Number(diamCalibration.unit_per_px) > 0 ? (
+                <p className="small">Calibración de la imagen · {Number(diamCalibration.unit_per_px).toPrecision(4)} {diamCalibration.unit}/px</p>
+              ) : null}
               {!diamResults.length ? (
                 <div className="placeholder small">Sin resultados.</div>
               ) : (
@@ -13795,19 +14096,21 @@ export default function App() {
                         <th>usar</th>
                         <th>imagen</th>
                         <th>mediciones</th>
+                        <th>escala</th>
                         <th>proyectos</th>
                         <th>tags</th>
                       </tr>
                     </thead>
                     <tbody>
                       {!diamAnalysisFilteredImages.length ? (
-                        <tr><td colSpan={5}>Sin imagenes para la vista actual.</td></tr>
+                        <tr><td colSpan={6}>Sin imagenes para la vista actual.</td></tr>
                       ) : diamAnalysisFilteredImages.map((img) => {
                         const imageId = String(img.image_id || '')
                         const summary = diamMeasurementSummaryByImage[imageId] || {}
                         const measurementCount = Number(summary.measurement_count || 0)
                         const disabled = measurementCount <= 0
                         const checked = selectedDiamAnalysisImageIds.includes(imageId)
+                        const metric = checked && diamAnalysisImageMetrics.find((item) => item.image_id === imageId)
                         return (
                           <tr key={`diam-analysis-img-${img.image_id}`}>
                             <td>
@@ -13816,24 +14119,36 @@ export default function App() {
                                 checked={checked}
                                 disabled={disabled}
                                 onChange={(e) => {
+                                  const enabled = e.target.checked
                                   setDiamAnalysisSelectedImages((prev) => {
                                     const hasExplicitSelection = Object.keys(prev).length > 0
                                     const base = hasExplicitSelection
                                       ? { ...prev }
                                       : Object.fromEntries(diamAnalysisSelectableImages.map((item) => [String(item.image_id || ''), true]).filter(([id]) => id))
-                                    base[imageId] = e.target.checked
+                                    base[imageId] = enabled
                                     return base
                                   })
                                 }}
                               />
                             </td>
                             <td>
-                              <div className="project-image-cell">
+                              <button type="button" className="project-image-cell scale-photo-trigger"
+                                aria-label={`Abrir foto ${img.image_name || imageId}`}
+                                title="Doble clic para abrir la foto"
+                                onDoubleClick={() => openProjectImageZoom(img, 1, true)}
+                                onClick={e => { if (e.detail === 0) openProjectImageZoom(img, 1, true) }}
+                                onContextMenu={e => {
+                                  e.preventDefault()
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  setContextMenu({ type: 'scalePhoto', image: img,
+                                    x: Math.max(0, Math.min(e.clientX || rect.left, window.innerWidth - 214 * (interfaceZoom / 100))),
+                                    y: Math.max(0, Math.min(e.clientY || rect.bottom, window.innerHeight - 48 * (interfaceZoom / 100))) })
+                                }}>
                                 {img.thumbnail_b64 ? (
                                   <img src={b64ToDataUrl(img.thumbnail_b64, img.thumbnail_mime || 'image/png')} alt={img.image_name || img.image_id} />
                                 ) : <span className="saved-image-empty" />}
                                 <strong>{img.image_name || img.image_id}</strong>
-                              </div>
+                              </button>
                             </td>
                             <td>
                               {disabled ? (
@@ -13843,8 +14158,12 @@ export default function App() {
                                   {measurementCount} med. · {Number(summary.calibrated_count || 0)} cal. · {Number(summary.uncalibrated_count || 0)} sin cal.
                                 </span>
                               )}
-                              {summary.latest_saved_at ? <small>{summary.latest_saved_at}</small> : null}
+                              {metric?.stats?.n > 0 && <div>Diámetro medio: {formatStatValue(metric.stats.mean, metric.unit === 'um' ? 'µm' : metric.unit)}</div>}
+                              {summary.latest_saved_at ? <small title="Fecha de registro de las mediciones">{summary.latest_saved_at}</small> : null}
                             </td>
+                            <ImageScaleCell imageId={imageId} calibration={diamImageScales === undefined ? undefined : diamImageScales?.[imageId] ?? null}
+                              loading={diamImageScales === null} refreshKey={diamMeasurementSummaryByImage}
+                              onEdit={scale => openProjectImageZoom(img, 1, 'editar', scale)} />
                             <td>{(img.project_ids || []).join(', ') || '-'}</td>
                             <td><StructuredTagPreview tags={structuredTagsWithProjects(img.structured_tags || img.tags || [], img.project_ids || [])} /></td>
                           </tr>
@@ -13863,6 +14182,8 @@ export default function App() {
                 {diamAnalysisValues.length ? (
                   <Histogram
                     values={diamAnalysisValues}
+                    key={JSON.stringify([diamAnalysisUnit, diamAnalysisChart.bins, diamAnalysisSelectionKey, diamAnalysisTagKey])}
+                    renderBin={bin => <HistogramCircles rows={bin.indices.map(i => graphedDiameterRows[i])} onOpen={openHistogramCircle} />}
                     unit={diamAnalysisUnit}
                     bins={diamAnalysisChart.bins}
                     width={diamAnalysisChart.width}
@@ -15298,50 +15619,101 @@ export default function App() {
               </aside>
             </div>
           </article>
-          <article className={`card viewer models-viewer ${workspaceTab === 'projectTransfer' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-projectTransfer">
-            <div className="transfer-workspace">
-              <section className="transfer-section">
+          <article className={`card settings-card ${workspaceTab === 'projectTransfer' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-projectTransfer">
+            <h1 data-tour="tab-strip-configuration">Configuración</h1>
+            <nav className="settings-tabs" aria-label="Secciones de configuración" data-tour="workspace-sidebar-projectTransfer">
+              {['Conexión', 'Objetivos', 'Exportar', 'Importar'].map(page => (
+                <button key={page} aria-current={settingsPage === page ? 'page' : undefined}
+                  data-tour={page === 'Exportar' ? 'tab-projectTransfer' : undefined}
+                  onClick={() => setSettingsPage(page)}>{page}</button>
+              ))}
+            </nav>
+            <div className="settings-body">
+              <div hidden={settingsPage !== 'Conexión'}>
+              <section className="settings-narrow">
+                <h2>Conexión con el agente</h2>
+                <div className="settings-box"><div className="settings-check">
+                <button className="primary" disabled={loading.agentCheck} onClick={async () => {
+                  setLoad('agentCheck', true)
+                  try {
+                    const status = await apiGet('/api/agent/connection')
+                    setAgentConnection(status.ready
+                      ? `LOCO ${status.version} · motor disponible · ${status.skill} · ${status.active_project_id || 'sin proyecto activo'}`
+                      : 'El motor responde. Falta la skill de entrada.')
+                  } catch { setAgentConnection('No se pudo comprobar la conexión con el motor.') }
+                  finally { setLoad('agentCheck', false) }
+                }}>{loading.agentCheck ? 'Comprobando…' : 'Comprobar conexión'}</button>
+                <span role="status" className="small">{agentConnection || 'Sin comprobar'}</span></div>
+                <label className="settings-switch">
+                  <span><strong>Modo Agente</strong><small>Muestra Proyecto, Agente, Modo Agente, Análisis y Configuración.</small></span>
+                  <input type="checkbox" role="switch" checked={agentOnly} onChange={(event) => {
+                    const enabled = event.target.checked
+                    window.localStorage.setItem('loco.agentOnlyNavigation', String(enabled))
+                    setAgentOnly(enabled)
+                  }} data-tour="settings-agent-mode" />
+                </label>
+                <label className="settings-zoom">
+                  <strong>Zoom de la interfaz</strong>
+                  <select value={interfaceZoom} onChange={event => setInterfaceZoom(Number(event.target.value))}>
+                    {interfaceZoomLevels.map(value => <option key={value} value={value}>{value} %</option>)}
+                  </select>
+                </label>
+                </div>
+              </section>
+              </div>
+              <div className="settings-narrow" hidden={settingsPage !== 'Objetivos'}>
+              {activeProject ? <AgentTargets key={activeProjectId} project={activeProject}
+                onSaved={(id, targets) => setProjects(items => items.map(p => p.project_id === id ? {...p, agent_targets: targets} : p))}/> : <p>Selecciona un proyecto para configurar sus objetivos.</p>}
+              </div>
+              <div hidden={settingsPage !== 'Exportar'}><div className="settings-export">
+              <section className="settings-section">
                 <div className="transfer-section-head">
                   <div>
                     <h2>Exportar proyecto</h2>
                     <p>Genera un ZIP portátil con el trabajo de entrenamiento seleccionado.</p>
                   </div>
-                  <button className="small-action" onClick={refreshTransferCatalog} disabled={loading.transferCatalog || transferImportBusy}>Refrescar</button>
                 </div>
-                <div className="mode-tabs compact">
-                  <button className={transferMode === 'project' ? 'active' : ''} onClick={() => setTransferMode('project')}>Por proyecto</button>
-                  <button className={transferMode === 'full' ? 'active' : ''} onClick={() => setTransferMode('full')}>Todo el sistema</button>
+                <div className="settings-tools">
+                  <div className="settings-segment" role="group" aria-label="Alcance de exportación">
+                    <button aria-pressed={transferMode === 'project'} onClick={() => setTransferMode('project')}>Por proyecto</button>
+                    <button aria-pressed={transferMode === 'full'} onClick={() => setTransferMode('full')}>Todo el sistema</button>
+                  </div>
+                  {transferMode === 'project' && <div className="settings-segment" role="group" aria-label="Detalle de exportación">
+                    <button aria-pressed={transferExportMode === 'simple'} onClick={() => setTransferExportMode('simple')}>Simple</button>
+                    <button aria-pressed={transferExportMode === 'advanced'} onClick={() => setTransferExportMode('advanced')}>Avanzado</button>
+                  </div>}
                 </div>
-                {transferMode === 'project' ? (
+                {transferMode === 'project' && <div className="settings-search">
+                  <input type="search" aria-label="Buscar proyecto" placeholder="Buscar proyecto…" value={projectSearch} onChange={e => setProjectSearch(e.target.value)} />
+                  <button disabled={loading.projects} onClick={() => refreshProjects({ prefillRoute: false })}>Refrescar</button>
+                </div>}
+                {transferMode === 'project' && !transferAdvancedActive && (
                   <>
-                    <div className="mode-tabs compact">
-                      <button className={transferExportMode === 'simple' ? 'active' : ''} onClick={() => setTransferExportMode('simple')}>Simple</button>
-                      <button className={transferExportMode === 'advanced' ? 'active' : ''} onClick={() => setTransferExportMode('advanced')}>Avanzado</button>
+                    <label className="settings-all">
+                      <input type="checkbox" disabled={!visibleTransferProjects.length}
+                        checked={visibleTransferProjects.length > 0 && visibleTransferProjects.every(p => transferProjectIds.includes(p.project_id))}
+                        onChange={e => selectTransferProjects(visibleTransferProjects.map(p => p.project_id), e.target.checked)} />
+                      {projectQuery ? 'Seleccionar resultados' : 'Seleccionar todos'}
+                      <small>{visibleTransferProjects.length} proyectos</small>
+                    </label>
+                    <div className="transfer-project-list">
+                      {visibleTransferProjects.map(project => (
+                        <label className="transfer-project-row" key={project.project_id}>
+                          <input type="checkbox" checked={transferProjectIds.includes(project.project_id)}
+                            onChange={e => selectTransferProjects([project.project_id], e.target.checked)} />
+                          <span><strong>{project.name || project.project_id}</strong>
+                            {project.name && project.name !== project.project_id && <em>{project.project_id}</em>}
+                          </span>
+                          {project.project_id === activeProjectId && <b className="settings-badge">Activo</b>}
+                        </label>
+                      ))}
                     </div>
-                    {transferExportMode === 'simple' ? (
-                      <div className="transfer-project-list">
-                        {projects.length ? projects.map((project) => (
-                          <label className="transfer-project-row" key={`transfer-project-${project.project_id}`}>
-                            <input
-                              type="checkbox"
-                              checked={transferProjectIds.includes(project.project_id)}
-                              onChange={() => toggleTransferProject(project.project_id)}
-                            />
-                            <span>
-                              <strong>{project.name || project.project_id}</strong>
-                              <em>{project.project_id === activeProjectId ? 'activo' : project.project_id}</em>
-                            </span>
-                          </label>
-                        )) : <div className="placeholder small">No hay proyectos creados.</div>}
-                      </div>
-                    ) : null}
                   </>
-                ) : (
-                  <p className="small">Exporta todas las categorias seleccionadas sin filtrar por proyecto.</p>
                 )}
+                {transferMode === 'project' && !visibleTransferProjects.length && <p className="small">No hay proyectos que mostrar.</p>}
                 {transferAdvancedActive ? (
                   <div className="transfer-project-accordion-list">
-                    {projects.length ? projects.map((project) => {
+                    {visibleTransferProjects.map((project) => {
                       const projectId = project.project_id
                       const categories = transferProjectCategories(projectId)
                       const selectedKeys = transferProjectCategorySelection?.[projectId] || []
@@ -15395,15 +15767,15 @@ export default function App() {
                           ) : null}
                         </div>
                       )
-                    }) : <div className="placeholder small">No hay proyectos creados.</div>}
+                    })}
                   </div>
-                ) : (
+                ) : transferMode === 'full' ? (
                   <label className="transfer-master-check">
                     <input type="checkbox" checked={transferAllSelected} onChange={(e) => toggleAllTransferCategories(e.target.checked)} />
                     <strong>{transferMode === 'project' ? 'Todo el proyecto seleccionado' : 'Todo'}</strong>
                     <span>{transferSelectedFiles} archivos | {formatBytes(transferSelectedSize)}</span>
                   </label>
-                )}
+                ) : null}
                 {transferMode === 'full' ? (
                   <div className="transfer-category-list">
                     {transferCatalog.map((item) => (
@@ -15417,24 +15789,20 @@ export default function App() {
                       </label>
                     ))}
                   </div>
-                ) : transferExportMode === 'simple' ? (
-                  <div className="transfer-summary">
-                    <span>Proyectos <strong>{transferSelectedProjects.length}</strong></span>
-                    <span>Categorias <strong>{transferCatalog.filter((item) => transferSelection[item.key]).length}</strong></span>
-                    <span>Archivos <strong>{transferSelectedFiles}</strong></span>
-                    <span>Tamano <strong>{formatBytes(transferSelectedSize)}</strong></span>
-                  </div>
-                ) : (
-                  <div className="transfer-summary">
-                    <span>Proyectos <strong>{transferAdvancedProjectCount}</strong></span>
-                    <span>Categorias elegidas <strong>{transferAdvancedCategoryCount}</strong></span>
-                    <span>Archivos estimados <strong>{transferSelectedFiles}</strong></span>
-                    <span>Tamano estimado <strong>{formatBytes(transferSelectedSize)}</strong></span>
-                  </div>
-                )}
-                {!transferCatalog.length ? <div className="placeholder small">Refresca para calcular el contenido disponible.</div> : null}
+                ) : null}
+              </section>
+              <aside className="settings-box settings-summary" aria-label="Resumen seleccionado">
+                <h3>Resumen seleccionado</h3>
+                <dl>
+                  <div><dt>Proyectos</dt><dd>{transferMode === 'full' ? projects.length : transferAdvancedActive ? transferAdvancedProjectCount : transferSelectedProjects.length}</dd></div>
+                  <div><dt>Categorías</dt><dd>{transferAdvancedActive ? transferAdvancedCategoryCount : transferHasSelection ? exportCategories.length : 0}</dd></div>
+                  <div><dt>Archivos</dt><dd>{loading.transferCatalog ? '…' : transferHasSelection ? transferSelectedFiles : 0}</dd></div>
+                  <div><dt>Tamaño estimado</dt><dd>{loading.transferCatalog ? '…' : formatBytes(transferHasSelection ? transferSelectedSize : 0)}</dd></div>
+                </dl>
+                {!transferHasSelection && !loading.transferCatalog && <p className="small">Selecciona el contenido que quieres exportar.</p>}
+                <button onClick={refreshTransferCatalog} disabled={loading.transferCatalog || transferImportBusy || (transferMode === 'project' && !transferAdvancedActive && !transferProjectIds.length)}>Actualizar tamaños</button>
                 <div className="transfer-actions">
-                  <button className="primary" onClick={prepareProjectExport} disabled={loading.transferExport || transferImportBusy || !transferHasSelection}>
+                  <button className="primary" onClick={prepareProjectExport} disabled={loading.transferCatalog || loading.transferExport || transferImportBusy || !transferHasSelection}>
                     {loading.transferExport ? 'Generando ZIP...' : (transferMode === 'project' ? 'Generar ZIP del proyecto' : 'Generar ZIP')}
                   </button>
                 </div>
@@ -15447,22 +15815,26 @@ export default function App() {
                     <span>La descarga comenzó automáticamente.</span>
                   </div>
                 ) : null}
-              </section>
+              </aside>
+              </div></div>
 
-              <section className="transfer-section">
+              <section hidden={settingsPage !== 'Importar'} className="settings-narrow">
                 <div className="transfer-section-head">
                   <div>
                     <h2>Importar proyecto</h2>
                     <p>Revisa el ZIP antes de agregar o reemplazar archivos locales.</p>
                   </div>
                 </div>
+                <div className="settings-box settings-steps">
+                <section><h3>Elegir archivo</h3>
                 <label className="field">
-                  <span>archivo ZIP</span>
+                  <span>Archivo ZIP</span>
                   <input
                     type="file"
                     accept=".zip,application/zip"
-                    disabled={loading.transferApply || !!transferImportJob}
+                    disabled={loading.transferInspect || transferImportBusy}
                     onChange={(e) => {
+                      setReplaceConflicts(false)
                       setTransferImportFile(e.target.files?.[0] || null)
                       setTransferImportInspection(null)
                       setTransferImportResult(null)
@@ -15478,6 +15850,8 @@ export default function App() {
                     }}
                   />
                 </label>
+                </section>
+                <section data-available={!!transferImportFile}><h3>Revisar contenido</h3>
                 <button onClick={inspectProjectImport} disabled={!transferImportFile || loading.transferInspect || transferImportBusy}>
                   {loading.transferInspect ? 'Revisando ZIP...' : 'Revisar contenido'}
                 </button>
@@ -15571,16 +15945,21 @@ export default function App() {
                     </div>
                     <p className="small">La importación solo agrega archivos del ZIP. Los archivos locales que no aparecen en el paquete se mantienen intactos.</p>
                     {transferImportNeedsProjectSelection ? <p className="small">Selecciona al menos un proyecto del ZIP para importar.</p> : null}
-                    {Number(transferImportInspection.summary.conflict_count || 0) > 0 ? (
-                      <div className="transfer-actions split">
-                        <button onClick={() => applyProjectImport(false)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar conservando existentes</button>
-                        <button className="primary" onClick={() => applyProjectImport(true)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar y sobrescribir conflictos</button>
-                      </div>
-                    ) : (
-                      <button className="primary" onClick={() => applyProjectImport(false)} disabled={transferImportBusy || transferImportNeedsProjectSelection}>Importar archivos</button>
-                    )}
                   </div>
                 ) : null}
+                </section>
+                <section data-available={!!transferImportInspection}><h3>Confirmar</h3>
+                  <div className="settings-segment" role="group" aria-label="Archivos existentes">
+                    <button aria-pressed={!replaceConflicts} disabled={transferImportBusy} onClick={() => setReplaceConflicts(false)}>Agregar</button>
+                    <button aria-pressed={replaceConflicts} disabled={!transferImportInspection?.summary?.conflict_count || transferImportBusy} onClick={() => setReplaceConflicts(true)}>Reemplazar</button>
+                  </div>
+                  {replaceConflicts && <p className="small">Se sobrescribirán los archivos locales en conflicto de la selección.</p>}
+                  <button className="primary" onClick={() => applyProjectImport(replaceConflicts)}
+                    disabled={!transferImportInspection?.token || loading.transferInspect || transferImportBusy || transferImportNeedsProjectSelection}>
+                    {replaceConflicts ? 'Importar y sobrescribir conflictos' : 'Importar proyecto'}
+                  </button>
+                </section>
+                </div>
                 {transferImportProgress ? (
                   <div className="transfer-progress">
                     <div className="transfer-progress-head">
@@ -15819,7 +16198,7 @@ export default function App() {
                                   className="btn-small"
                                   onClick={() => {
                                     const originToLoad = selectedGridOrigin[item.image_id] || item.scribble_origin || ''
-                                    loadSavedImage(item.image_id, originToLoad)
+                                    loadSavedImage(item.image_id, originToLoad, true)
                                   }}
                                   disabled={loading.libraryLoad}
                                   title="Cargar esta imagen en Scribble"
@@ -16208,11 +16587,14 @@ export default function App() {
       {contextMenu && (
         <>
           <div className="context-menu-overlay" onClick={closeContextMenu} />
-          <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
-            {contextMenu.type === 'scribble' ? (
+          <div className="context-menu" style={{ left: layoutPixels(contextMenu.x), top: layoutPixels(contextMenu.y) }}>
+            {contextMenu.type === 'scalePhoto' ? (
+              <button type="button" autoFocus onKeyDown={e => { if (e.key === 'Escape') closeContextMenu() }}
+                onClick={() => { openProjectImageZoom(contextMenu.image, 1, true); closeContextMenu() }}>Abrir foto</button>
+            ) : contextMenu.type === 'scribble' ? (
               <>
                 <button onClick={() => {
-                  loadSavedImage(contextMenu.imageId, contextMenu.origin)
+                  loadSavedImage(contextMenu.imageId, contextMenu.origin, true)
                   closeContextMenu()
                 }}>
                   Cargar

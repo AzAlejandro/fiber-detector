@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from . import persistence as scribble_persistence
+from .paths import DATA_HOME
 from .diameter_research import persistence as diameter_persistence
 
 
@@ -98,7 +99,7 @@ def _category_definitions() -> dict[str, TransferCategory]:
         'loco_dataset': TransferCategory('loco_dataset', 'Dataset LOCO', (TransferSource('datasets', diam / 'datasets'),)),
         'loco_training_runs': TransferCategory('loco_training_runs', 'Historial de entrenamiento LOCO', (TransferSource('training_runs', diam / 'training_runs'),)),
         'loco_saved_models': TransferCategory('loco_saved_models', 'Modelos LOCO guardados', (TransferSource('saved_training_models', diam / 'saved_training_models'),)),
-        'diameter_analysis': TransferCategory('diameter_analysis', 'Analisis de diametros', (TransferSource('diameter_analysis', base / 'diameter_analysis'), TransferSource('calibration', Path(__file__).resolve().parents[1] / 'data' / 'calibration'))),
+        'diameter_analysis': TransferCategory('diameter_analysis', 'Analisis de diametros', (TransferSource('diameter_analysis', base / 'diameter_analysis'), TransferSource('calibration', DATA_HOME / 'data' / 'calibration'))),
     }
 
 

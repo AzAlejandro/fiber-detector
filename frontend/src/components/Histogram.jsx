@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 
 /**
  * Histogram component renders an SVG bar chart of diameter values.
@@ -34,18 +34,20 @@ function computeBins(values, binCount) {
   const max = Math.max(...values)
   if (max === min) {
     // All values identical: single bin
-    return [{ binStart: min, binEnd: min + 1, count: values.length }]
+    return [{ binStart: min, binEnd: min + 1, count: values.length, indices: values.map((_, index) => index) }]
   }
   const binWidth = (max - min) / binCount
   const bins = Array.from({ length: binCount }, (_, i) => ({
     binStart: min + i * binWidth,
     binEnd: min + (i + 1) * binWidth,
     count: 0,
+    indices: [],
   }))
-  for (const v of values) {
+  values.forEach((v, index) => {
     const idx = Math.min(Math.floor((v - min) / binWidth), binCount - 1)
     bins[idx].count += 1
-  }
+    bins[idx].indices.push(index)
+  })
   return bins
 }
 
@@ -114,7 +116,9 @@ export default function Histogram({
   borderRight = false,
   borderBottom = true,
   borderLeft = true,
+  renderBin,
 }) {
+  const [selectedBin, setSelectedBin] = useState(null)
   const stats = useMemo(() => computeStats(values), [values])
   const binned = useMemo(() => computeBins(values, binCount), [values, binCount])
 
@@ -234,7 +238,15 @@ export default function Histogram({
               y={y}
               width={barW}
               height={barH}
-              fill={barColor}
+              role={renderBin && b.count ? 'button' : undefined}
+              tabIndex={renderBin && b.count ? 0 : undefined}
+              aria-label={renderBin && b.count ? `Ver ${b.count} mediciones del intervalo ${formatTick(b.binStart)}–${formatTick(b.binEnd)} ${unit}` : undefined}
+              aria-pressed={renderBin && b.count ? selectedBin === i : undefined}
+              onClick={renderBin && b.count ? () => setSelectedBin(i) : undefined}
+              onKeyDown={renderBin && b.count ? e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedBin(i) }
+              } : undefined}
+              fill={renderBin && selectedBin === i ? '#276f95' : barColor}
               stroke={strokeColor}
               strokeWidth="0.5"
               rx="1"
@@ -271,6 +283,7 @@ export default function Histogram({
           {yLabel || 'Frecuencia'}
         </text>
       </svg>
+      {renderBin && binned[selectedBin]?.count > 0 && renderBin(binned[selectedBin])}
     </div>
   )
 }

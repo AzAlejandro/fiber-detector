@@ -7,7 +7,10 @@ import json
 import secrets
 import shutil
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any, Literal
 
 import cv2
@@ -28,6 +31,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 
 from ..image_codec import encode_display_b64, encode_gray_png_b64
+from ..agent_mode import manifest_path as agent_manifest_path, result as agent_result
 from ..library_store import list_library_images, load_library_image, normalize_structured_tags
 from ..persistence import list_runs as list_segmentation_runs
 from ..persistence import load_run as load_segmentation_run
@@ -91,6 +95,15 @@ from .validation import attach_run, export_validation, list_cases, upsert_case
 
 
 router = APIRouter(prefix='/api/diameter-research', tags=['diameter-research'])
+_points_edit_lock = RLock()
+
+
+def _serialize_point_edit(operation):
+    @wraps(operation)
+    def locked(*args, **kwargs):
+        with _points_edit_lock:
+            return operation(*args, **kwargs)
+    return locked
 
 
 class PointItem(BaseModel):
@@ -98,13 +111,19 @@ class PointItem(BaseModel):
     y: float
 
 
+class StoredPointItem(PointItem):
+    circle_type: str = ''
+    radius_px: float = 0
+
+
 class PointsUpdateReq(BaseModel):
     session_id: str
+    agent_run: str = ''
     action: Literal['add', 'remove_last', 'remove_active', 'set_active', 'clear', 'replace']
     x: float | None = None
     y: float | None = None
     active_index: int | None = None
-    points: list[PointItem] = Field(default_factory=list)
+    points: list[StoredPointItem] = Field(default_factory=list)
     geometry: dict[str, Any] | None = None
     circle_type: str = ''
     image_id: str = ''
@@ -112,6 +131,7 @@ class PointsUpdateReq(BaseModel):
 
 class PointsSaveReq(BaseModel):
     session_id: str
+    agent_run: str = ''
     image_id: str
     geometry: dict[str, Any] | None = None
 
@@ -122,6 +142,21 @@ class SaveCircleReq(BaseModel):
     y: float
     circle_type: str = ''
     radius_px: float = 0
+
+
+class BatchCircle(PointItem):
+    x: float = Field(ge=0, allow_inf_nan=False)
+    y: float = Field(ge=0, allow_inf_nan=False)
+    radius_px: float = Field(ge=1, allow_inf_nan=False)
+    circle_type: Literal['valid', 'crossing', 'other_valid'] = 'valid'
+
+
+class CircleBatchReq(BaseModel):
+    session_id: str
+    agent_run: str = ''
+    image_id: str
+    circles: list[BatchCircle] = Field(min_length=1, max_length=200)
+    save: bool = False
 
 
 class SyncPointsReq(BaseModel):
@@ -568,6 +603,15 @@ def _latest_prior(
     prior_run_id: str = '',
 ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
     selected = str(prior_run_id or '').strip()
+    if selected.startswith('agent:'):
+        path = agent_manifest_path(selected.removeprefix('agent:'))
+        manifest = json.loads(path.read_text(encoding='utf8'))
+        if manifest['image_id'] != image_id:
+            raise HTTPException(400, 'La máscara del agente pertenece a otra imagen.')
+        mask = cv2.imread(str(path.with_name('mascara.png')), cv2.IMREAD_GRAYSCALE)
+        if mask is None or mask.shape != shape_hw:
+            raise HTTPException(422, 'La máscara del agente no coincide con las dimensiones de la imagen.')
+        return (mask > 0).astype(np.float32), None, selected
     if selected and selected != 'latest':
         return _prior_from_segmentation_run(image_id, selected, shape_hw, use_mask=use_mask)
     for row in list_segmentation_runs(image_id):
@@ -3620,11 +3664,85 @@ def _loco_circle_measure_overlay(image_rgb: np.ndarray, proposals: list[dict[str
     return rgb
 
 
+def _editor_key(image_id, agent_run):
+    if not agent_run:
+        return image_id
+    source = agent_result(agent_run)
+    if source['image_id'] != image_id:
+        raise HTTPException(422, 'La ejecución pertenece a otra imagen.')
+    return 'agent_editor_' + agent_run
+
+
+class AgentEditorReq(BaseModel):
+    session_id: str
+    image_id: str
+    contacts: dict[str, list[PointItem]] = Field(default_factory=dict)
+
+
+@router.post('/agent-editor/{run_id}')
+@_serialize_point_edit
+def open_agent_editor(run_id: str, req: AgentEditorReq):
+    sess = _require_active_image(req.session_id, req.image_id)
+    key = _editor_key(req.image_id, run_id)
+    state = drp.load_points(key)
+    source = agent_result(run_id)['circles']
+    manual_ids = {c['id'] for c in source if c.get('source') == 'manual'}
+    previous = set(state.get('detection_manual_ids', []))
+    if not state['found'] or manual_ids != previous:
+        geometry = state['geometry']
+        circles = geometry['circles']
+        points = state['points']
+        removed = {f'agent_{run_id}_{i}' for i in previous - manual_ids}
+        for c in list(circles):
+            if c['geometry_id'] in removed:
+                circles.remove(c)
+                match = next((p for p in points if (p['x'], p['y']) == (c['center']['x'], c['center']['y'])), None)
+                if match is not None:
+                    points.remove(match)
+        for c in source:
+            if state['found'] and c['id'] not in manual_ids - previous:
+                continue
+            center = dict(x=c['x'], y=c['y'])
+            circles.append(dict(center=center, radius=c['radius_px'], type='valid',
+                geometry_id=f"agent_{run_id}_{c['id']}", agent_contacts=[
+                    p.model_dump() for p in req.contacts.get(str(c['id']), [])]))
+            points.append(center)
+        geometry['circle_active_idx'] = min(max(0, geometry['circle_active_idx']), len(circles) - 1)
+        state = drp.save_points(key, points, min(max(0, state['active_point_idx']), len(points) - 1),
+                                geometry, detection_manual_ids=sorted(manual_ids))
+    return _points_response(sess, state)
+
+
+@router.post('/agent-editor/{run_id}/contacts')
+@_serialize_point_edit
+def mark_agent_contacts(run_id: str, req: AgentEditorReq):
+    """Fill missing perimeter contacts on the latest saved geometry."""
+    sess = _require_active_image(req.session_id, req.image_id)
+    key = _editor_key(req.image_id, run_id)
+    state = drp.load_points(key)
+    if not state.get('found'):
+        raise HTTPException(404, 'Abre primero el editor de esta ejecución.')
+    added = 0
+    for circle in state['geometry']['circles']:
+        points = req.contacts.get(circle['geometry_id'])
+        if circle.get('agent_contacts') or not points:
+            continue
+        contacts = drp.normalize_circle_contacts([p.model_dump() for p in points], circle['center'], circle['radius'])
+        if contacts:
+            circle['agent_contacts'] = contacts
+            added += 1
+    if added:
+        state = drp.save_points(key, state['points'], state['active_point_idx'], state['geometry'])
+    return {**_points_response(sess, state), 'marked': added}
+
+
 @router.post('/points/update')
+@_serialize_point_edit
 def points_update(req: PointsUpdateReq) -> dict[str, Any]:
     sess = _require_active_image(req.session_id)
     image_id = str(req.image_id or '').strip() or str(sess.image_id or '')
-    state = drp.load_points(image_id)
+    key = _editor_key(image_id, req.agent_run)
+    state = drp.load_points(key)
     points = _clamp_points(list(state.get('points') or []), sess.image_rgb.shape[:2])
     active = int(state.get('active_point_idx', 0 if points else -1))
     geometry = drp.normalize_geometry(state.get('geometry') or {})
@@ -3660,23 +3778,101 @@ def points_update(req: PointsUpdateReq) -> dict[str, Any]:
     if req.geometry is not None and req.action != 'clear':
         geometry = drp.normalize_geometry(req.geometry)
 
-    payload = drp.save_points(image_id, points, active, geometry=geometry)
+    payload = drp.save_points(key, points, active, geometry=geometry)
     return _points_response(sess, payload)
 
 
 @router.post('/points/save')
+@_serialize_point_edit
 def points_save(req: PointsSaveReq) -> dict[str, Any]:
     sess = _require_active_image(req.session_id, req.image_id)
-    payload = drp.load_points(req.image_id)
+    key = _editor_key(req.image_id, req.agent_run)
+    payload = drp.load_points(key)
     geometry = req.geometry if req.geometry is not None else payload.get('geometry')
-    saved = drp.save_points(req.image_id, list(payload.get('points') or []), int(payload.get('active_point_idx', -1)), geometry=geometry)
+    saved = drp.save_points(key, list(payload.get('points') or []), int(payload.get('active_point_idx', -1)), geometry=geometry)
     return _points_response(sess, saved)
 
 
+@router.post('/points/circles/batch', summary='Preview or append circles in image pixel coordinates')
+@_serialize_point_edit
+def points_circle_batch(req: CircleBatchReq) -> dict[str, Any]:
+    sess = _require_active_image(req.session_id, req.image_id)
+    height, width = sess.image_rgb.shape[:2]
+    key = _editor_key(req.image_id, req.agent_run)
+    state = drp.load_points(key)
+    geometry = state['geometry']
+    points = list(state['points'])
+    previous = {circle['geometry_id'] for circle in geometry['circles']}
+    added = []
+    selected = []
+    centers = set()
+    for index, item in enumerate(req.circles, 1):
+        x, y, radius = item.x, item.y, item.radius_px
+        if min(x - radius, y - radius) < 0 or x + radius > width - 1 or y + radius > height - 1:
+            raise HTTPException(422, f'El círculo {index} sale de la imagen ({width} × {height} px).')
+        if (x, y) in centers:
+            raise HTTPException(422, f'El círculo {index} repite el centro de otro círculo del lote.')
+        centers.add((x, y))
+        fingerprint = hashlib.sha256(item.model_dump_json().encode()).hexdigest()[:24]
+        circle = {
+            'center': {'x': x, 'y': y}, 'radius': radius, 'type': item.circle_type,
+            'geometry_id': f'circle_batch_{fingerprint}', 'consumed': False,
+        }
+        selected.append(circle)
+        if circle['geometry_id'] not in previous:
+            added.append(circle)
+
+    preview = sess.image_rgb.copy()
+    for index, circle in enumerate(selected, 1):
+        center = tuple(round(circle['center'][axis]) for axis in ('x', 'y'))
+        radius = round(circle['radius'])
+        cv2.circle(preview, center, radius, (72, 250, 157), 2, cv2.LINE_AA)
+        cv2.circle(preview, center, 2, (255, 40, 101), -1, cv2.LINE_AA)
+        text = str(index)
+        (text_width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, .43, 1)
+        label_x = center[0] + radius + 3
+        if label_x + text_width >= width:
+            label_x = max(0, center[0] - radius - text_width - 3)
+        text_origin = (label_x, max(12, center[1] - 3))
+        cv2.putText(preview, text, text_origin, cv2.FONT_HERSHEY_SIMPLEX, .43, (18, 45, 35), 3, cv2.LINE_AA)
+        cv2.putText(preview, text, text_origin, cv2.FONT_HERSHEY_SIMPLEX, .43, (255, 255, 255), 1, cv2.LINE_AA)
+    preview_b64, preview_mime = encode_display_b64(preview)
+
+    if req.save and added:
+        for circle in added:
+            center = circle['center']
+            if not any(point['x'] == center['x'] and point['y'] == center['y'] for point in points):
+                points.append({**center, 'circle_type': circle['type'], 'radius_px': circle['radius']})
+        geometry['circles'].extend(added)
+        geometry['circle_active_idx'] = len(geometry['circles']) - 1
+        active_center = added[-1]['center']
+        active_point = next(i for i, point in enumerate(points)
+                            if point['x'] == active_center['x'] and point['y'] == active_center['y'])
+        state = drp.save_points(key, points, active_point, geometry)
+
+    return {
+        'ok': True, 'image_id': req.image_id, 'image_size': {'width': width, 'height': height},
+        'selected': selected, 'added_count': len(added) if req.save else 0,
+        'new_count': len(added), 'preview_b64': preview_b64, 'preview_mime': preview_mime,
+        'points': state['points'], 'active_point_idx': state['active_point_idx'], 'geometry': state['geometry'],
+        'measurement_request': {
+            'session_id': req.session_id, 'image_id': req.image_id, 'method_id': METHOD_ID_CIRCLE_SQUARE,
+            'source_mode': 'prior_mask', 'active_only': False,
+            'points': [circle['center'] for circle in selected],
+            'params': {'circle_square_seed_mode': 'manual_circle', 'circle_square_circles_by_point': [{
+                'circle_square_seed_radius_px': circle['radius'],
+                'circle_square_center_x': circle['center']['x'],
+                'circle_square_center_y': circle['center']['y'],
+                'circle_square_geometry_id': circle['geometry_id'],
+            } for circle in selected]},
+        },
+    }
+
+
 @router.get('/points/load')
-def points_load(session_id: str, image_id: str) -> dict[str, Any]:
+def points_load(session_id: str, image_id: str, agent_run: str = '') -> dict[str, Any]:
     sess = _require_active_image(session_id, image_id)
-    payload = drp.load_points(image_id)
+    payload = drp.load_points(_editor_key(image_id, agent_run))
     return _points_response(sess, payload)
 
 
@@ -3697,6 +3893,7 @@ def points_counts(image_id: str) -> dict[str, Any]:
 
 
 @router.post('/points/save-circle')
+@_serialize_point_edit
 def points_save_circle(req: SaveCircleReq) -> dict[str, Any]:
     iid = str(req.image_id or '').strip()
     print(f'[DEBUG-SAVE] Received: image_id={iid}, x={req.x}, y={req.y}, type={req.circle_type}')
@@ -3743,6 +3940,7 @@ def points_list(image_id: str) -> dict[str, Any]:
 
 
 @router.post('/points/sync')
+@_serialize_point_edit
 def points_sync(req: SyncPointsReq) -> dict[str, Any]:
     iid = str(req.image_id or '').strip()
     print(f'[DEBUG-SYNC] Syncing {len(req.points or [])} points for image={iid}')
@@ -4150,7 +4348,8 @@ def loco_preview(req: LocoPreviewReq) -> dict[str, Any]:
         'result': result,
         'radius_candidates': candidates,
         'meta': dict(pipeline_out.get('meta') or {}),
-        'diagnostics': dict(pipeline_out.get('diagnostics') or {}),
+        'diagnostics': {key: value for key, value in (pipeline_out.get('diagnostics') or {}).items()
+                        if key not in {'loco_overlay', 'profiles_raw_v3'}},
     }
 
 
@@ -6461,9 +6660,11 @@ def loco_models_measure_accepted(req: LocoModelMeasureReq) -> dict[str, Any]:
 
 # ── Calibration ──────────────────────────────────────────────────────────
 
-CALIBRATION_DIR = Path(__file__).resolve().parents[2] / 'data' / 'calibration'
-LOCO_MODEL_PRESETS_DIR = Path(__file__).resolve().parents[2] / 'data' / 'loco_model_presets'
-LOCO_MODEL_EXCLUSIONS_DIR = Path(__file__).resolve().parents[2] / 'data' / 'loco_model_exclusions'
+from ..paths import DATA_HOME
+
+CALIBRATION_DIR = DATA_HOME / 'data' / 'calibration'
+LOCO_MODEL_PRESETS_DIR = DATA_HOME / 'data' / 'loco_model_presets'
+LOCO_MODEL_EXCLUSIONS_DIR = DATA_HOME / 'data' / 'loco_model_exclusions'
 
 
 def _calibration_safe_id(text: str) -> str:
@@ -6484,6 +6685,7 @@ class CalibrationSaveReq(BaseModel):
     known_value: float
     pixel_distance: float
     unit_per_px: float
+    direct_factor: bool = False
     line_x1: float | None = None
     line_y1: float | None = None
     line_x2: float | None = None
@@ -6606,6 +6808,8 @@ def _load_calibration_data(image_id: str) -> dict[str, Any] | None:
     line_distance = 0.0
     if has_line:
         line_distance = float(np.hypot(float(data.get('line_x2')) - float(data.get('line_x1')), float(data.get('line_y2')) - float(data.get('line_y1'))))
+    if line_distance <= 0 and data.get('direct_factor'):
+        line_distance = 1.0
     if line_distance <= 0:
         data.update({
             'pixel_distance': 0,
@@ -6724,7 +6928,9 @@ def calibration_save(req: CalibrationSaveReq) -> dict[str, Any]:
     line_distance = 0.0
     if has_line:
         line_distance = float(np.hypot(float(req.line_x2) - float(req.line_x1), float(req.line_y2) - float(req.line_y1)))
-    if not has_line or line_distance <= 0 or known_value <= 0:
+    if req.direct_factor and all(v is None for v in line_values):
+        line_distance = 1.0
+    if not np.isfinite(known_value) or req.unit not in ('nm', 'um') or line_distance <= 0 or known_value <= 0:
         raise HTTPException(status_code=400, detail='Dibuja una linea de escala valida antes de guardar la calibracion.')
     pixel_distance = line_distance
     unit_per_px = known_value / pixel_distance
@@ -6734,6 +6940,7 @@ def calibration_save(req: CalibrationSaveReq) -> dict[str, Any]:
         'image_id': req.image_id,
         'enabled': True,
         'unit': req.unit,
+        'direct_factor': req.direct_factor and not has_line,
         'known_value': known_value,
         'pixel_distance': pixel_distance,
         'unit_per_px': unit_per_px,
@@ -6742,12 +6949,18 @@ def calibration_save(req: CalibrationSaveReq) -> dict[str, Any]:
         'line_x2': req.line_x2,
         'line_y2': req.line_y2,
         # Legacy aliases preserved for older readers.
-        'known_nm': known_value,
+        'known_nm': known_value if req.unit == 'nm' else known_value * 1000,
         'nm_per_px': unit_per_px if str(req.unit or 'nm') == 'nm' else unit_per_px * 1000.0,
     }
-    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+    with NamedTemporaryFile(dir=path.parent, delete=False, suffix='.tmp') as f:
+        temp_path = Path(f.name)
+        f.write(json.dumps(data, indent=2).encode())
+    try:
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
     measurements = analysis_store.update_measurements_calibration_for_image(req.image_id, data)
-    return {'ok': True, 'image_id': req.image_id, 'measurements': measurements}
+    return {'ok': True, 'image_id': req.image_id, 'calibration': data, 'measurements': measurements}
 
 
 @router.get('/calibration/load')
@@ -6782,10 +6995,25 @@ def results_list(image_id: str) -> dict[str, Any]:
 
 
 @router.get('/results/get')
-def results_get(run_id: str) -> dict[str, Any]:
+def results_get(run_id: str, geometry_only: bool = False) -> dict[str, Any]:
     if not str(run_id or '').strip():
         raise HTTPException(status_code=400, detail='run_id requerido.')
     try:
+        if geometry_only:
+            if Path(run_id).name != run_id or run_id in {'.', '..'}:
+                raise HTTPException(status_code=400, detail='run_id inválido.')
+            record = json.loads((drp.RUNS_DIR / run_id / 'meta.json').read_text(encoding='utf-8'))
+            meta = record.get('meta') or {}
+            results = record.get('results')
+            if results is None:
+                results = drp.load_diameter_run(run_id)['results']
+            keys = ('point_index', 'x', 'y', 'original_xy', 'circle_radius_px', 'interactive_geometry_id', 'circle_square_geometry_id')
+            return {
+                'results': [{k: r[k] for k in keys if k in r} for r in results],
+                'meta': {'prior_run_id': meta.get('prior_run_id'), 'params_effective': {
+                    'circle_square_circles_by_point': (meta.get('params_effective') or {}).get('circle_square_circles_by_point', []),
+                }},
+            }
         item = drp.load_diameter_run(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -6872,7 +7100,12 @@ def measurements_query_post(req: MeasurementQueryReq) -> dict[str, Any]:
 
 @router.get('/measurements/summary-by-image')
 def measurements_summary_by_image() -> dict[str, Any]:
-    return {'ok': True, 'items': analysis_store.summarize_measurements_by_image()}
+    scales = {}
+    for path in CALIBRATION_DIR.glob('*.json'):
+        calibration = _load_calibration_data(path.stem)
+        if calibration and calibration.get('unit_per_px', 0) > 0:
+            scales[calibration['image_id']] = calibration
+    return {'ok': True, 'items': analysis_store.summarize_measurements_by_image(), 'calibrations': scales}
 
 
 @router.get('/analysis/list')

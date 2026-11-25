@@ -52,6 +52,15 @@ const GROUPS = [
     ],
   },
   {
+    key: 'agentTraining', label: 'Agente', fullLabel: 'Entrenamiento del agente',
+    icon: 'psychology', section: 'training',
+    tabs: [
+      { key: 'trainStrokes', label: 'Scribbles' },
+      { key: 'trainCircles', label: 'Círculos' },
+      { key: 'trainSkills', label: 'Biblioteca de skills' },
+    ],
+  },
+  {
     key: 'detection',
     label: 'Deteccion',
     fullLabel: 'Grupo 3: Deteccion y Medicion',
@@ -61,6 +70,15 @@ const GROUPS = [
       { key: 'locoModel', label: 'Detector LOCO' },
       { key: 'diameter', label: 'Medicion de Diametros' },
     ],
+  },
+  {
+    key: 'agent',
+    label: 'Modo agente',
+    fullLabel: 'Modo agente · Detección de fibras y bordes',
+    icon: 'smart_toy',
+    section: 'production',
+    tabs: [{ key: 'agentMask', label: 'Obtención de máscara' }, { key: 'agentMode', label: 'Detección de fibras y bordes' },
+      { key: 'agentDiameter', label: 'Medición de diámetros' }],
   },
   {
     key: 'analysis',
@@ -122,6 +140,11 @@ export function legacyToGroup(tab) {
     locoModelManager: { group: 'loco', tab: 'locoModelManager' },
     locoModel: { group: 'detection', tab: 'locoModel' },
     diameter: { group: 'detection', tab: 'diameter' },
+    agentMode: { group: 'agent', tab: 'agentMode' },
+    agentEdges: { group: 'agent', tab: 'agentMode' },
+    trainStrokes: { group: 'agentTraining', tab: 'trainStrokes' },
+    trainCircles: { group: 'agentTraining', tab: 'trainCircles' },
+    trainSkills: { group: 'agentTraining', tab: 'trainSkills' },
     diameterAnalysis: { group: 'analysis', tab: 'diameterAnalysisSelect' },
     diameterAnalysisSelect: { group: 'analysis', tab: 'diameterAnalysisSelect' },
     diameterAnalysisHistogram: { group: 'analysis', tab: 'diameterAnalysisHistogram' },
@@ -148,6 +171,13 @@ export function groupToLegacy(group, tab) {
     'loco:locoModelManager': 'locoModelManager',
     'detection:locoModel': 'locoModel',
     'detection:diameter': 'diameter',
+    'agent:agentMode': 'agentMode',
+    'agent:agentMask': 'workbench',
+    'agent:agentEdges': 'agentMode',
+    'agent:agentDiameter': 'diameter',
+    'agentTraining:trainStrokes': 'trainStrokes',
+    'agentTraining:trainCircles': 'trainCircles',
+    'agentTraining:trainSkills': 'trainSkills',
     'detection:diameterAnalysis': 'diameterAnalysisSelect',
     'analysis:diameterAnalysisSelect': 'diameterAnalysisSelect',
     'analysis:diameterAnalysisHistogram': 'diameterAnalysisHistogram',
@@ -162,95 +192,49 @@ export function groupToLegacy(group, tab) {
 
 export { GROUPS }
 
-export default function Navigation({ activeGroup, onGroupChange, onTabChange, forceExpanded = false }) {
+const AGENT_GROUPS = new Set(['project', 'agentTraining', 'agent', 'analysis', 'configuration'])
+export function isAgentGroup(key) { return AGENT_GROUPS.has(key) }
+
+const sections = [
+  ['project', 'Proyecto', 'folder_open'],
+  ['training', 'Entrenamiento', 'model_training'],
+  ['production', 'Produccion', 'precision_manufacturing'],
+  ['other', 'Otros', 'more_horiz'],
+]
+
+export default function Navigation({ activeGroup, onGroupChange, forceExpanded = false, agentOnly = false }) {
   const [collapsed, setCollapsed] = useState(true)
   const isCollapsed = forceExpanded ? false : collapsed
 
-  function handleGroupClick(key) {
-    onGroupChange(key)
+  function groupButton(group) {
+    return (
+      <button key={group.key} className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
+        onClick={() => onGroupChange(group.key)} title={isCollapsed ? group.fullLabel : group.label}
+        aria-label={group.label} data-tour={`sidebar-group-${group.key}`}>
+        <MaterialIcon className="sidebar-icon" name={group.icon} />
+        {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
+      </button>
+    )
   }
 
   return (
-    <aside
-      className={`sidebar ${isCollapsed ? 'collapsed' : 'expanded'}`}
-      onMouseEnter={() => setCollapsed(false)}
-      onMouseLeave={() => { if (!forceExpanded) setCollapsed(true) }}
-    >
-      <button
-        className="sidebar-toggle"
-        onClick={() => { if (!forceExpanded) setCollapsed((current) => !current) }}
-        title={isCollapsed ? 'Expandir menu' : 'Colapsar menu'}
-      >
+    <aside className={`sidebar ${isCollapsed ? 'collapsed' : 'expanded'}`}
+      onMouseEnter={() => setCollapsed(false)} onMouseLeave={() => { if (!forceExpanded) setCollapsed(true) }}>
+      <button className="sidebar-toggle" onClick={() => { if (!forceExpanded) setCollapsed(current => !current) }}
+        title={isCollapsed ? 'Expandir menu' : 'Colapsar menu'}>
         <MaterialIcon className="sidebar-toggle-icon" name={isCollapsed ? 'menu' : 'close'} />
         {!isCollapsed && <span className="sidebar-toggle-label">Menu</span>}
       </button>
-
-      <div className="sidebar-section-label">
-        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="folder_open" /> : 'Proyecto'}
-      </div>
-      {GROUPS.filter((group) => group.section === 'project').map((group) => (
-        <button
-          key={group.key}
-          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
-          onClick={() => handleGroupClick(group.key)}
-          title={isCollapsed ? group.fullLabel : group.label}
-          data-tour={`sidebar-group-${group.key}`}
-        >
-          <MaterialIcon className="sidebar-icon" name={group.icon} />
-          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
-        </button>
-      ))}
-
-      <div className="sidebar-separator" />
-      <div className="sidebar-section-label">
-        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="model_training" /> : 'Entrenamiento'}
-      </div>
-      {GROUPS.filter((group) => group.section === 'training').map((group) => (
-        <button
-          key={group.key}
-          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
-          onClick={() => handleGroupClick(group.key)}
-          title={isCollapsed ? group.fullLabel : group.label}
-          data-tour={`sidebar-group-${group.key}`}
-        >
-          <MaterialIcon className="sidebar-icon" name={group.icon} />
-          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
-        </button>
-      ))}
-
-      <div className="sidebar-separator" />
-      <div className="sidebar-section-label">
-        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="precision_manufacturing" /> : 'Produccion'}
-      </div>
-      {GROUPS.filter((group) => group.section === 'production').map((group) => (
-        <button
-          key={group.key}
-          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
-          onClick={() => handleGroupClick(group.key)}
-          title={isCollapsed ? group.fullLabel : group.label}
-          data-tour={`sidebar-group-${group.key}`}
-        >
-          <MaterialIcon className="sidebar-icon" name={group.icon} />
-          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
-        </button>
-      ))}
-
-      <div className="sidebar-separator" />
-      <div className="sidebar-section-label">
-        {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name="more_horiz" /> : 'Otros'}
-      </div>
-      {GROUPS.filter((group) => group.section === 'other').map((group) => (
-        <button
-          key={group.key}
-          className={`sidebar-group-btn ${activeGroup === group.key ? 'active' : ''}`}
-          onClick={() => handleGroupClick(group.key)}
-          title={isCollapsed ? group.fullLabel : group.label}
-          data-tour={`sidebar-group-${group.key}`}
-        >
-          <MaterialIcon className="sidebar-icon" name={group.icon} />
-          {!isCollapsed && <span className="sidebar-label">{group.label}</span>}
-        </button>
-      ))}
+      {agentOnly ? GROUPS.filter(group => isAgentGroup(group.key)).map(groupButton)
+        : sections.map(([section, label, icon], i) => (
+          <React.Fragment key={section}>
+            {i > 0 && <div className="sidebar-separator" />}
+            <div className="sidebar-section-label">
+              {isCollapsed ? <MaterialIcon className="sidebar-section-icon" name={icon} /> : label}
+            </div>
+            {GROUPS.filter(group => group.section === section).map(groupButton)}
+          </React.Fragment>
+        ))}
     </aside>
   )
 }

@@ -72,9 +72,10 @@ def test_calibration_save_load_delete(tmp_path, monkeypatch) -> None:
             'image_id': iid,
             'enabled': True,
             'unit': 'nm',
-            'known_value_px': 100.0,
+            'known_value': 100.0,
             'pixel_distance': 50.0,
-            'nm_per_px': 2.0,
+            'unit_per_px': 2.0,
+            'line_x1': 0, 'line_y1': 2, 'line_x2': 50, 'line_y2': 2,
         },
     )
     assert save_res.status_code == 200, save_res.text
@@ -134,21 +135,25 @@ def test_calibration_save_overwrites_existing(tmp_path, monkeypatch) -> None:
     # save first version
     c.post(
         '/api/diameter-research/calibration/save',
-        json={'image_id': iid, 'enabled': True, 'unit': 'nm', 'known_value_px': 100.0, 'pixel_distance': 50.0, 'nm_per_px': 2.0},
-    )
+        json={'image_id': iid, 'enabled': True, 'unit': 'nm', 'known_value': 100.0, 'pixel_distance': 50.0, 'unit_per_px': 2.0,
+              'line_x1': 0, 'line_y1': 2, 'line_x2': 50, 'line_y2': 2},
+    ).raise_for_status()
 
     # save second version (overwrite)
     c.post(
         '/api/diameter-research/calibration/save',
-        json={'image_id': iid, 'enabled': False, 'unit': 'um', 'known_value_px': 200.0, 'pixel_distance': 80.0, 'nm_per_px': 2.5},
-    )
+        json={'image_id': iid, 'enabled': True, 'unit': 'um', 'known_value': 0.2, 'pixel_distance': 80.0, 'unit_per_px': 0.0025,
+              'line_x1': 0, 'line_y1': 4, 'line_x2': 80, 'line_y2': 4},
+    ).raise_for_status()
 
     load_res = c.get(f'/api/diameter-research/calibration/load?image_id={iid}')
     assert load_res.status_code == 200
     cal = load_res.json()['calibration']
     assert cal['unit'] == 'um'
     assert cal['nm_per_px'] == 2.5
-    assert cal['enabled'] is False
+    assert cal['unit_per_px'] == 0.0025
+    assert cal['line_x2'] == 80 and cal['line_y1'] == cal['line_y2'] == 4
+    assert cal['enabled'] is True
 
 
 def test_calibration_safe_id_sanitizes_special_chars(tmp_path, monkeypatch) -> None:
@@ -161,9 +166,36 @@ def test_calibration_safe_id_sanitizes_special_chars(tmp_path, monkeypatch) -> N
     c = TestClient(app)
     c.post(
         '/api/diameter-research/calibration/save',
-        json={'image_id': dirty_id, 'enabled': True, 'unit': 'nm', 'known_value_px': 50.0, 'pixel_distance': 25.0, 'nm_per_px': 2.0},
-    )
+        json={'image_id': dirty_id, 'enabled': True, 'unit': 'nm', 'known_value': 50.0, 'pixel_distance': 25.0, 'unit_per_px': 2.0,
+              'line_x1': 0, 'line_y1': 2, 'line_x2': 25, 'line_y2': 2},
+    ).raise_for_status()
 
     safe = api._calibration_safe_id(dirty_id)
     cal_file = tmp_path / 'data' / 'calibration' / f'{safe}.json'
     assert cal_file.exists(), f'Expected {cal_file} to exist'
+
+def test_analysis_scale_per_image_direct_and_bar(tmp_path, monkeypatch):
+    from backend.diameter_research import api, analysis_store as store
+    monkeypatch.setattr(api, 'CALIBRATION_DIR', tmp_path/'calibrations')
+    monkeypatch.setattr(store, 'ANALYSIS_ROOT', tmp_path)
+    monkeypatch.setattr(store, 'MEASUREMENTS_PATH', tmp_path/'measurements.json')
+    monkeypatch.setattr(store, 'ANALYSES_DIR', tmp_path/'analyses')
+    monkeypatch.setattr(store, 'EXPORTS_DIR', tmp_path/'exports')
+    store._save_measurements([dict(image_id='sample', diameter_px=4, measurement_id='m')])
+    c = TestClient(app)
+    base = '/api/diameter-research'
+    sample = dict(image_id='sample', enabled=True, direct_factor=True, known_value=.01, unit='um',
+                  pixel_distance=1, unit_per_px=.01)
+    assert c.post(base+'/calibration/save', json=sample).status_code == 200
+    cal = c.get(base+'/calibration/load?image_id=sample').json()['calibration']
+    assert cal['nm_per_px'] == 10 and cal['line_x1'] is None
+    assert store._load_measurements()[0]['diameter_nm'] == 40
+    bar = dict(sample,image_id='bar',unit='nm',direct_factor=False,known_value=1000,
+               line_x1=10,line_x2=108,line_y1=3,line_y2=3)
+    c.post(base+'/calibration/save',json=bar).raise_for_status()
+    bar.update(unit='um',known_value=2)
+    c.post(base+'/calibration/save',json=bar).raise_for_status()
+    scales = c.get(base+'/measurements/summary-by-image').json()['calibrations']
+    assert scales['bar']['unit_per_px']==2/98 and scales['bar']['line_x2']==108
+    assert scales['sample']==cal
+    assert c.post(base+'/calibration/save',json=dict(sample,known_value=0)).status_code==400

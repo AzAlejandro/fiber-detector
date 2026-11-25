@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from itertools import permutations
 from datetime import datetime
 from typing import Any
 
@@ -676,6 +677,7 @@ def _circle_mask_quadrilateral(
     center_xy: tuple[float, float],
     radius_px: float,
     fallback_tangent: np.ndarray,
+    marked_contacts=None,
 ) -> dict[str, Any]:
     cx, cy = float(center_xy[0]), float(center_xy[1])
     radius = max(1.0, float(radius_px))
@@ -723,6 +725,17 @@ def _circle_mask_quadrilateral(
         }
     runs.sort(key=lambda item: int(item.get('length', 0)), reverse=True)
     selected = runs[:2]
+    if marked_contacts is not None:
+        pts = np.asarray(marked_contacts, dtype=np.float64)
+        if (pts.shape != (4, 2) or not np.isfinite(pts).all() or len(np.unique(pts, axis=0)) != 4
+                or np.max(np.abs(np.linalg.norm(pts - [cx, cy], axis=1) - radius)) > .02):
+            return {'status': 'failed', 'reason': 'invalid_marked_contacts'}
+        # Associate the actual marked vertices with the two inside arcs before pairing the flanks.
+        anchors = np.array([p for arc in selected for p in arc['points']])
+        order = min(permutations(range(4)), key=lambda ids: np.sum((pts[list(ids)] - anchors)**2))
+        for i, arc in enumerate(selected):
+            arc['points'] = pts[list(order[2*i:2*i+2])]
+            arc['midpoint'] = np.mean(arc['points'], axis=0)
     arc_midpoints = [np.asarray(r['midpoint'], dtype=np.float64) for r in selected]
     tangent = _unit(arc_midpoints[1] - arc_midpoints[0], tuple(float(v) for v in _unit(fallback_tangent, (1.0, 0.0))))
     normal = _unit([-tangent[1], tangent[0]], (0.0, 1.0))
@@ -1497,7 +1510,8 @@ def _circle_square_mask_measurement(
     widths: list[dict[str, Any]] = []
     circle_quad_diag: dict[str, Any] = {}
     if manual_circle_locked:
-        circle_quad_diag = _circle_mask_quadrilateral(mask=mask, center_xy=(cx, cy), radius_px=chosen_radius, fallback_tangent=tangent)
+        circle_quad_diag = _circle_mask_quadrilateral(mask=mask, center_xy=(cx, cy), radius_px=chosen_radius,
+            fallback_tangent=tangent, marked_contacts=params.get('agent_contacts_xy'))
         if circle_quad_diag.get('status') != 'ok':
             return {
                 'status': 'failed',
@@ -2084,7 +2098,7 @@ def _run_hybrid_profile_diameter_v3_variant(
         manual_circles = point_params.get('circle_square_circles_by_point')
         if isinstance(manual_circles, list) and point_idx < len(manual_circles) and isinstance(manual_circles[point_idx], dict):
             circle_params = manual_circles[point_idx]
-            for circle_key in ('circle_square_seed_radius_px', 'circle_square_center_x', 'circle_square_center_y', 'circle_square_geometry_id'):
+            for circle_key in ('circle_square_seed_radius_px', 'circle_square_center_x', 'circle_square_center_y', 'circle_square_geometry_id', 'agent_contacts_xy'):
                 if circle_key in circle_params:
                     point_params[circle_key] = circle_params[circle_key]
         edge_measurement, edge_candidates = _sweep_edge_pairs(
@@ -2489,9 +2503,10 @@ def _run_hybrid_profile_diameter_v3_variant(
                 'point_index': int(item.get('point_index', -1)),
                 'original_xy': item.get('original_xy'),
                 'loco': dict(item.get('mask_driven') or {}),
+                'best': (item.get('mask_driven') or {}).get('best'),
                 'result': item.get('result'),
             }
-            for item in diagnostics_points
+            for item in diagnostics_v3['points']
         ],
     } if method_id == METHOD_ID_LOCO else {}
     return {

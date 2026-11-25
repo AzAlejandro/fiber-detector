@@ -3,10 +3,14 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from threading import Event, Thread
+from typing import Annotated, Any
 
 import cv2
 import numpy as np
@@ -16,6 +20,12 @@ from pydantic import BaseModel, Field
 from PIL import Image
 
 from .assist_models import router as assist_models_router
+from .agent_mode import router as agent_router
+from .distribution import router as distribution_router
+from .agent_views import router as agent_views_router, view_info
+from .agent_worklist import follow as follow_agent_circles
+from .agent_masks import router as agent_masks_router
+from .agent_training import router as agent_training_router
 from .catalog import build_registry
 from .diameter_research.api import router as diameter_research_router
 from .image_codec import decode_png_b64, encode_display_b64, encode_gray_png_b64, to_gray_u8, to_uint8_rgb
@@ -52,15 +62,32 @@ from .scribble import decode_scribble_b64, has_fg_bg, labels_to_visual
 from .session_store import store
 
 
-app = FastAPI(title='scribble_research backend', version='0.2.0')
+@asynccontextmanager
+async def lifespan(app):
+    stop = Event()
+    worker = Thread(target=follow_agent_circles, args=(stop,), daemon=True, name='agent-circles')
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(timeout=3)
+
+
+app = FastAPI(title='scribble_research backend', version='0.2.0', lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
+    allow_origins=[] if os.environ.get('LOCO_DESKTOP') else ['*'],
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
 )
 app.include_router(diameter_research_router)
+app.include_router(agent_router)
+app.include_router(distribution_router)
+app.include_router(agent_views_router)
+app.include_router(agent_masks_router)
+app.include_router(agent_training_router)
 app.include_router(assist_models_router)
 app.include_router(project_transfer_router)
 app.include_router(projects_router)
@@ -121,6 +148,7 @@ class LibraryLoadReq(BaseModel):
     image_id: str
     restore_scribbles: bool = True
     scribble_origin: str = ''
+    agent_view: bool = False
 
 
 class LibraryDeleteReq(BaseModel):
@@ -189,8 +217,6 @@ def _resolve_existing_dir(path_text: str) -> Path:
     raw = str(path_text or '').strip().strip('"').strip("'")
     if not raw:
         raise HTTPException(status_code=400, detail='Ruta requerida.')
-    # Normalize backslashes for Windows
-    raw = raw.replace('/', '\\')
     path = Path(raw).expanduser()
     try:
         path = path.resolve()
@@ -208,14 +234,6 @@ def _default_tutorial_local_image_dir() -> Path:
 
 
 def _select_directory_with_dialog(initial_dir: str = '') -> Path:
-    if os.name != 'nt':
-        raise HTTPException(status_code=400, detail='Elegir directorio solo esta soportado automaticamente en Windows.')
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f'No se pudo abrir el selector de carpetas: {exc}') from exc
-
     resolved_initial = ''
     candidates = [
         str(initial_dir or '').strip(),
@@ -231,6 +249,23 @@ def _select_directory_with_dialog(initial_dir: str = '') -> Path:
         except HTTPException:
             continue
 
+    if sys.platform == 'darwin':
+        chooser = ('on run argv\n'
+                   'set origin to POSIX file (item 1 of argv) as alias\n'
+                   'return POSIX path of (choose folder with prompt "Elegir directorio de imágenes" default location origin)\n'
+                   'end run')
+        dialog = subprocess.run(['/usr/bin/osascript', '-', resolved_initial or str(Path.home())],
+                                input=chooser, capture_output=True, text=True)
+        if dialog.returncode:
+            raise HTTPException(status_code=400, detail='El selector se cerró sin elegir una carpeta.')
+        return _resolve_existing_dir(dialog.stdout.strip())
+    if os.name != 'nt':
+        raise HTTPException(status_code=400, detail='Introduce la ruta de la carpeta en este sistema.')
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError as exc:
+        raise HTTPException(status_code=400, detail=f'No se pudo abrir el selector de carpetas: {exc}') from exc
     root = tk.Tk()
     root.withdraw()
     root.attributes('-topmost', True)
@@ -344,6 +379,8 @@ def _load_uploaded_image_to_session(
     scale_percent: float = 100.0,
     project_id: str = '',
     source_label: str = '',
+    native_resolution: bool = False,
+    agent_view: bool = False,
 ) -> dict[str, Any]:
     if not raw:
         raise HTTPException(status_code=400, detail='Archivo de imagen vacio.')
@@ -355,7 +392,11 @@ def _load_uploaded_image_to_session(
     rgb = to_uint8_rgb(img)
     if rgb is None:
         raise HTTPException(status_code=400, detail='Formato de imagen no soportado.')
-    rgb, cap_applied, cap_scale = _cap_image_to_max_resolution(rgb, DEFAULT_MAX_RESOLUTION_PX)
+    project = _project_for_upload(project_id)
+    if agent_view and project_id and not project:
+        raise HTTPException(404, 'Proyecto desconocido.')
+    cap = None if native_resolution else DEFAULT_MAX_RESOLUTION_PX
+    rgb, cap_applied, cap_scale = _cap_image_to_max_resolution(rgb, cap)
     rgb = _resize_percent(rgb, float(scale_percent))
 
     sess.image_rgb = rgb
@@ -364,7 +405,6 @@ def _load_uploaded_image_to_session(
     sess.gt_mask = None
     sess.touch()
 
-    project = _project_for_upload(project_id)
     project_tags, project_ids, structured_tags = project_tags_for_image(project)
     register_library_image(
         sess.image_id,
@@ -376,6 +416,10 @@ def _load_uploaded_image_to_session(
         structured_tags=structured_tags,
     )
 
+    if agent_view:
+        return dict(session_id=sess.session_id, image_id=sess.image_id, image_name=sess.image_name,
+                    project_id=project.get('project_id') if project else '',
+                    view=view_info(sess.image_id, rgb.shape[1], rgb.shape[0]))
     image_b64, image_mime = encode_display_b64(rgb)
     return {
         'session_id': sess.session_id,
@@ -386,7 +430,7 @@ def _load_uploaded_image_to_session(
         'image_mime': image_mime,
         'has_gt_mask': False,
         'scale_percent': float(np.clip(float(scale_percent), 1.0, 100.0)),
-        'max_resolution_px': int(DEFAULT_MAX_RESOLUTION_PX),
+        'max_resolution_px': cap,
         'cap_applied': bool(cap_applied),
         'cap_scale': float(cap_scale),
         'source_path': str(source_label or name),
@@ -394,9 +438,9 @@ def _load_uploaded_image_to_session(
     }
 
 
-def _cap_image_to_max_resolution(image: np.ndarray, max_resolution_px: int) -> tuple[np.ndarray, bool, float]:
+def _cap_image_to_max_resolution(image: np.ndarray, max_resolution_px: int | None) -> tuple[np.ndarray, bool, float]:
     img = np.asarray(image)
-    if img.ndim < 2:
+    if img.ndim < 2 or max_resolution_px is None:
         return image, False, 1.0
     h, w = img.shape[:2]
     m = int(max(1, max_resolution_px))
@@ -635,6 +679,7 @@ async def api_image_load(
     file: UploadFile = File(...),
     gt_file: UploadFile | None = File(default=None),
     scale_percent: float = Form(default=100.0),
+    native_resolution: Annotated[bool, Form()] = False,
 ) -> dict[str, Any]:
     sess = _require_session(session_id)
     raw = await file.read()
@@ -644,7 +689,8 @@ async def api_image_load(
     rgb = to_uint8_rgb(img)
     if rgb is None:
         raise HTTPException(status_code=400, detail='Formato de imagen no soportado.')
-    rgb, cap_applied, cap_scale = _cap_image_to_max_resolution(rgb, DEFAULT_MAX_RESOLUTION_PX)
+    cap = None if native_resolution else DEFAULT_MAX_RESOLUTION_PX
+    rgb, cap_applied, cap_scale = _cap_image_to_max_resolution(rgb, cap)
     rgb = _resize_percent(rgb, float(scale_percent))
 
     gt = None
@@ -677,7 +723,7 @@ async def api_image_load(
         'image_mime': image_mime,
         'has_gt_mask': bool(isinstance(gt, np.ndarray)),
         'scale_percent': float(np.clip(float(scale_percent), 1.0, 100.0)),
-        'max_resolution_px': int(DEFAULT_MAX_RESOLUTION_PX),
+        'max_resolution_px': cap,
         'cap_applied': bool(cap_applied),
         'cap_scale': float(cap_scale),
     }
@@ -731,6 +777,10 @@ def api_library_load(req: LibraryLoadReq) -> dict[str, Any]:
     sess.image_id = loaded_id
     sess.gt_mask = None
     sess.touch()
+
+    if req.agent_view:
+        return _ok('Imagen lista para el agente.', payload=dict(session_id=req.session_id, image_id=loaded_id,
+                   image_name=sess.image_name, view=view_info(image_id, rgb.shape[1], rgb.shape[0])))
 
     draft_payload: dict[str, Any] = {'found': False, 'image_id': loaded_id}
     if req.restore_scribbles:
@@ -885,6 +935,7 @@ async def api_local_image_upload_browser(
     project_id: str = Form(default=''),
     source_label: str = Form(default=''),
     scale_percent: float = Form(default=100.0),
+    native_resolution: Annotated[bool, Form()] = False,
 ) -> dict[str, Any]:
     sess = _require_session(session_id)
     raw = await file.read()
@@ -896,8 +947,17 @@ async def api_local_image_upload_browser(
         scale_percent=scale_percent,
         project_id=project_id,
         source_label=label,
+        native_resolution=native_resolution,
     )
     return _ok('Imagen cargada desde navegador.', level='success', payload=payload)
+
+
+@app.post('/api/agent/images/import')
+async def import_agent_image(session_id: str = Form(), file: UploadFile = File(), project_id: str = Form('')):
+    payload = _load_uploaded_image_to_session(
+        _require_session(session_id), await file.read(), file.filename, project_id=project_id,
+        agent_view=True)
+    return _ok('Imagen lista para el agente.', payload=payload)
 
 
 @app.post('/api/system/open-folder')
@@ -913,8 +973,10 @@ def api_system_open_folder(req: OpenFolderReq) -> dict[str, Any]:
     try:
         if os.name == 'nt':
             os.startfile(str(target))  # type: ignore[attr-defined]
+        elif sys.platform == 'darwin':
+            subprocess.run(['/usr/bin/open', str(target)], check=True)
         else:
-            raise RuntimeError('Abrir carpeta solo esta soportado automaticamente en Windows.')
+            raise RuntimeError('Abre la ruta en el explorador de archivos de tu sistema.')
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f'No se pudo abrir carpeta: {exc}') from exc
     return _ok('Carpeta abierta.', level='success', payload={'path': str(target)})

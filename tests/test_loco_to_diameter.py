@@ -11,6 +11,72 @@ import numpy as np
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.agent_geometry import choose
+
+
+def test_agent_selects_one_circle_per_continuous_fiber():
+    mask = np.zeros((80, 140), dtype=bool)
+    mask[18:23, 10:130] = True
+    mask[36:41, 10:130] = True
+    candidates = [(score, x, y, 6, 20, True) for score, x, y in
+                  [(100, 30, 20), (90, 65, 20), (80, 100, 20), (70, 30, 38)]]
+    selected = choose(mask, candidates, spacing=9, limit=100)
+    assert [(x, y) for _, x, y, *_ in selected] == [(30, 20), (30, 38)]
+
+
+def test_agent_editor_contacts_edits_and_measurement(tmp_path, monkeypatch):
+    from backend.diameter_research import api
+    c, sid, iid = _setup(tmp_path, monkeypatch)
+    rid = 'a'*32
+    base = '/api/diameter-research'
+    args = dict(session_id=sid,image_id=iid)
+    mask = np.zeros((128,128),dtype=np.float32)
+    mask[60:69,:] = 1
+    monkeypatch.setattr(api, 'agent_result', lambda run: dict(image_id=iid,circles=[dict(id=1,x=64,y=64,radius_px=10)]))
+    monkeypatch.setattr(api, '_latest_prior', lambda *a, **kw: (mask,None,'agent:'+rid))
+    dy = 3.25
+    dx = (100-dy**2)**.5
+    pts = [[64+i*dx,64+j*dy] for i,j in [(1,1),(-1,1),(-1,-1),(1,-1)]]
+    payload = {**args,'contacts':{'1':[dict(x=x,y=y) for x,y in pts]}}
+    def post(path, data):
+        res = c.post(base+path,json=data)
+        assert res.status_code==200, res.text
+        return res.json()
+    editor = post('/agent-editor/'+rid,payload)
+    shape = editor['geometry']['circles'][0]
+    assert shape['agent_contacts']==payload['contacts']['1']
+    measured = post('/run',dict(**args,method_id='circle_square_mask_diameter',prior_run_id='agent:'+rid,
+        source_mode='prior_mask',points=[shape['center']],params={'circle_square_seed_mode':'manual_circle',
+        'circle_square_circles_by_point':[dict(circle_square_seed_radius_px=10,agent_contacts_xy=pts)]}))
+    result = measured['results'][0]
+    assert result['status']=='ok'
+    assert np.isclose(result['diameter_px'],2*dy)
+    assert sorted(result['square_vertices_xy'])==sorted(pts)
+    shape['radius'] = 12
+    change = dict(**args,agent_run=rid,action='replace',points=[shape['center']],geometry=editor['geometry'])
+    assert 'agent_contacts' not in post('/points/update',change)['geometry']['circles'][0]
+    key = shape['geometry_id']
+    marking = '/agent-editor/'+rid+'/contacts'
+    assert post(marking,{**args,'contacts':{key:payload['contacts']['1']}})['marked']==0
+    enlarged = [dict(x=64+(x-64)*1.2,y=64+(y-64)*1.2) for x,y in pts]
+    assert post(marking,{**args,'contacts':{key:enlarged}})['marked']==1
+    repeated = post(marking,{**args,'contacts':{key:payload['contacts']['1']}})
+    assert repeated['marked']==0 and repeated['geometry']['circles'][0]['agent_contacts']==enlarged
+    post('/points/update',dict(**args,agent_run=rid,action='clear'))
+    assert post('/agent-editor/'+rid,payload)['geometry']['circles']==[]
+    assert c.get(base+'/points/load',params=args).json()['points']==[]
+    manual = dict(id=2, x=30, y=40, radius_px=6, source='manual')
+    detections = [manual]
+    monkeypatch.setattr(api, 'agent_result', lambda run: dict(image_id=iid, circles=detections))
+    added = post('/agent-editor/'+rid, payload)
+    assert [item['center'] for item in added['geometry']['circles']] == [dict(x=30, y=40)]
+    assert len(post('/agent-editor/'+rid, payload)['points']) == 1
+    detections.clear()
+    assert post('/agent-editor/'+rid, payload)['points'] == []
+    detections.append(manual)
+    assert len(post('/agent-editor/'+rid, payload)['geometry']['circles']) == 1
+    post('/points/update',dict(**args,agent_run=rid,action='clear'))
+    assert post('/agent-editor/'+rid,payload)['geometry']['circles']==[]
 
 
 def _img(size: int = 128) -> np.ndarray:

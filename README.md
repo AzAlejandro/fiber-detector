@@ -12,6 +12,14 @@
 
 </div>
 
+## Instalar o actualizar
+
+[Versiones para descargar](https://github.com/AzAlejandro/LOCO-detector/releases/latest) · [Guía para personas y agentes](docs/INSTALAR_ACTUALIZAR.md)
+
+Puedes pedirle a un agente con acceso local: **«Instala LOCO desde https://github.com/AzAlejandro/LOCO-detector y comprueba la conexión»**. Después basta **«Actualiza LOCO»**. Elige la edición que aparece en los archivos de la release: escritorio para Windows x64 o Mac Apple Silicon cuando estén publicados, o el paquete Docker.
+
+Para preparar los instaladores y probar una actualización antes de publicarla, consulta la [guía de distribución de escritorio](docs/PREPARAR_ESCRITORIO.md).
+
 ## 📸 Demo
 
 <!--
