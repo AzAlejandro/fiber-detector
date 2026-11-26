@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 304" role="img" aria-labelledby="title desc">
+  <title id="title">Cómo mide LOCO una fibra</title>
+  <desc id="desc">Primero se etiquetan fibra, halo y fondo para generar una máscara. Los dos bordes de una fibra cortan el círculo en cuatro puntos. El segmento transversal mide el ancho de la fibra. Con la escala de cada imagen, los diámetros se agrupan en un histograma. Dibujo esquemático.</desc>
+  <defs>
+    <pattern id="dots" patternUnits="userSpaceOnUse" width="10" height="10">
+      <circle cx="3" cy="3" r=".85" fill="#d3ddd2"/>
+    </pattern>
+    <clipPath id="field"><rect width="278" height="132" rx="6"/></clipPath>
+  </defs>
+  <style>
+    text{font-family:system-ui,sans-serif;fill:#153431}
+    .heading{font-size:21px;font-weight:700}
+    .copy{font-size:16px}
+    .axis{font-size:14px;fill:#37534c}
+  </style>
+  <rect width="960" height="304" rx="12" fill="#f3f6ed"/>
+  <g stroke="#c6d2c4"><path d="M319 23v258M639 23v258"/></g>
+  <g transform="translate(21 0)">
+    <text class="heading" y="42">Trazos y máscara</text>
+    <g transform="translate(0 63)" clip-path="url(#field)">
+      <rect width="278" height="132" fill="#e2e9dc"/>
+      <rect width="278" height="132" fill="url(#dots)"/>
+      <path d="M-20 110Q88 99 147 63T306 20" stroke="#adbda9" stroke-width="49" fill="none"/>
+      <path d="M-20 110Q88 99 147 63T306 20" stroke="#546c61" stroke-width="31" fill="none"/>
+      <g fill="none" stroke-width="6" stroke-linecap="round">
+        <path d="M45 100q23-4 43-11" stroke="#bafa9d"/>
+        <path d="M166 31q17-8 34-14" stroke="#ffe4a3"/>
+        <path d="M179 113q21 4 39-1" stroke="#226379"/>
+      </g>
+    </g>
+    <text class="copy" y="230">Los trazos distinguen la fibra,</text>
+    <text class="copy" y="253">el halo y el fondo.</text>
+  </g>
+  <g transform="translate(341 0)">
+    <text class="heading" y="42">Círculo y cruces</text>
+    <g transform="translate(0 63)" clip-path="url(#field)">
+      <rect width="278" height="132" fill="#e2e9dc"/>
+      <rect width="278" height="132" fill="url(#dots)"/>
+      <g transform="translate(139 66) rotate(-15)">
+        <rect x="-170" y="-15" width="340" height="30" fill="#62796c"/>
+        <circle r="53" fill="none" stroke="#17614f" stroke-width="3"/>
+        <g fill="#c6f9b0" stroke="#153431" stroke-width="2">
+          <circle cx="-50.83" cy="-15" r="5"/><circle cx="50.83" cy="-15" r="5"/>
+          <circle cx="-50.83" cy="15" r="5"/><circle cx="50.83" cy="15" r="5"/>
+        </g>
+        <path d="M0-15v30m-5-30H5M-5 15H5" fill="none" stroke="#ffdf8c" stroke-width="3"/>
+      </g>
+    </g>
+    <text class="copy" y="230">Cuatro cruces sitúan los bordes.</text>
+    <text class="copy" y="253">El segmento amarillo mide el ancho.</text>
+  </g>
+  <g transform="translate(661 0)">
+    <text class="heading" y="42">Escala e histograma</text>
+    <g transform="translate(0 63)">
+      <rect width="278" height="132" rx="6" fill="#e2e9dc"/>
+      <g transform="translate(18 0)">
+        <path d="M11 47v54h220" stroke="#536e62" stroke-width="1.5" fill="none"/>
+        <text x="8" y="24" class="axis">Frecuencia</text>
+        <g fill="#3d7762">
+          <rect x="22" y="86" width="23" height="15"/><rect x="49" y="68" width="23" height="33"/>
+          <rect x="76" y="44" width="23" height="57"/><rect x="103" y="30" width="23" height="71"/>
+          <rect x="130" y="53" width="23" height="48"/><rect x="157" y="73" width="23" height="28"/>
+          <rect x="184" y="87" width="23" height="14"/>
+        </g>
+        <text x="230" y="121" text-anchor="end" class="axis">Diámetro</text>
+      </g>
+    </g>
+    <text class="copy" y="230">La escala convierte píxeles a nm o µm.</text>
+    <text class="copy" y="253">El histograma agrupa los diámetros.</text>
+  </g>
+  <text x="939" y="289" text-anchor="end" class="axis">Esquema del método</text>
+</svg>
