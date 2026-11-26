@@ -1,13 +1,31 @@
 # ![LOCO Detector · Medición de diámetros de nanofibras en micrografías TEM](docs/assets/portada-loco.png)
 
-[**Descargar LOCO para escritorio**](https://github.com/AzAlejandro/fiber-detector/releases/latest) · [Conectar mi agente](docs/INSTALAR_ACTUALIZAR.md) · [Imagen para la primera prueba](frontend/public/tutorial/overview-reference.png)
+[**Cómo instalar LOCO**](#cómo-instalar-loco) · [Conectar mi agente](docs/INSTALAR_ACTUALIZAR.md#conectar-un-agente) · [Imagen para la primera prueba](frontend/public/tutorial/overview-reference.png)
 
 **¿Qué diámetros tienen las fibras de una muestra y cómo se distribuyen?** LOCO Detector permite responder a esa pregunta a partir de imágenes de microscopía electrónica de transmisión (TEM). Conecta un agente, entrégale las micrografías y pídele que las procese. En LOCO podrás ver qué fibra midió en cada círculo, revisar la escala y explorar el histograma del proyecto.
 
+## Cómo instalar LOCO
+
+La edición de escritorio incluye el motor y la interfaz. Si utilizas un agente con acceso a tu equipo, puedes pedirle **«Instala LOCO desde https://github.com/AzAlejandro/fiber-detector, conecta mi agente y comprueba que funciona»**. También puedes instalarlo manualmente en tres pasos.
+
+### Windows x64
+
+1. [Descarga el instalador de Windows (.exe)](https://github.com/AzAlejandro/fiber-detector/releases/latest/download/LOCO-Windows-x64.exe).
+2. Abre `LOCO-Windows-x64.exe` y sigue el asistente. Conserva la carpeta de destino propuesta si después vas a conectar Codex con los comandos de la guía.
+3. Al terminar, selecciona **Abrir LOCO Detector**. En adelante puedes abrirlo desde el menú **Inicio**.
+
+### macOS 15 o posterior con Apple Silicon
+
+1. [Descarga el instalador de Mac (.dmg)](https://github.com/AzAlejandro/fiber-detector/releases/latest/download/LOCO-macOS-arm64.dmg).
+2. Abre el DMG. En Finder, pulsa **⌘⇧G**, escribe `~/Applications` y pulsa **Intro**. Si la carpeta aún no existe, créala en tu carpeta de usuario con el nombre `Applications`.
+3. Arrastra `LOCO.app` desde el DMG a esa carpeta. Abre la copia que acabas de instalar.
+
+**Comprueba la instalación.** LOCO abre la interfaz en tu navegador. Si la pestaña no aparece, abre `http://127.0.0.1:5181` mientras LOCO está en ejecución. En **Configuración → Conexión → Comprobar conexión** verás la versión y el estado del motor. Las notas de la versión incluyen las sumas SHA-256 y el estado de firma de los instaladores. [Notas y archivos de la versión estable](https://github.com/AzAlejandro/fiber-detector/releases/latest)
+
 ## Tu primer análisis con un agente
 
-1. **Instala LOCO y conecta el agente.** La edición de escritorio está disponible para **Windows x64** y **macOS 15 o posterior con Apple Silicon**. Si usas Codex u otro agente con acceso a tu equipo, puedes escribir «Instala LOCO desde github.com/AzAlejandro/fiber-detector y conecta mi agente». La guía incluye los comandos de conexión mediante MCP. [Instalación paso a paso](docs/INSTALAR_ACTUALIZAR.md)
-2. **Comprueba la conexión.** Abre **Configuración → Conexión → Comprobar conexión** en LOCO. Después pídele al agente «Dime qué proyecto está activo en LOCO». En una biblioteca nueva puedes crear el primero desde el mismo pedido.
+1. **Conecta el agente.** Si hiciste la instalación manual, registra el conector local de LOCO en tu agente. La guía incluye los comandos de Codex para Windows y Mac. [Conectar un agente mediante MCP](docs/INSTALAR_ACTUALIZAR.md#conectar-un-agente)
+2. **Prueba el conector.** En un chat nuevo, pídele al agente «Dime qué versión de LOCO está instalada y qué proyecto está activo». En una biblioteca nueva puedes crear el primer proyecto en el siguiente paso.
 3. **Adjunta una micrografía al chat y prueba este pedido.** También puedes darle una carpeta de imágenes a la que tenga acceso.
 
    > Crea un proyecto llamado «Primer ensayo» y procesa esta imagen hasta obtener los diámetros. Comprueba la escala, guarda las mediciones y dime cuántas quedaron registradas y cuáles necesitan revisión.
