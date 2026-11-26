@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
+import re
 from typing import Any
 
 import numpy as np
@@ -33,12 +34,16 @@ def now_str() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def compute_image_id(image_rgb: np.ndarray) -> str:
+def compute_image_id(image_rgb: np.ndarray, library_id: str = '') -> str:
     rgb = to_uint8_rgb(image_rgb)
     if rgb is None:
         raise ValueError('Imagen invalida para hash.')
     h = hashlib.sha1(rgb.tobytes()).hexdigest()[:12]
-    return f'img_{h}'
+    content_id = f'img_{h}'
+    # Independent project copies keep the pixel hash and a library suffix.
+    if re.fullmatch(content_id + r'__[a-f0-9]{12}', library_id):
+        return library_id
+    return content_id
 
 
 def new_run_id(experiment_id: str) -> str:
@@ -160,6 +165,7 @@ def run_experiment(
     params: dict[str, Any] | None = None,
     gt_mask: np.ndarray | None = None,
     exclude_rect: dict[str, Any] | None = None,
+    library_id: str = '',
 ) -> RunArtifacts:
     exp = registry.get(experiment_id)
     rgb = to_uint8_rgb(image_rgb)
@@ -226,7 +232,7 @@ def run_experiment(
 
     return RunArtifacts(
         run_id=new_run_id(exp.info.experiment_id),
-        image_id=compute_image_id(rgb),
+        image_id=compute_image_id(rgb, library_id),
         experiment_id=exp.info.experiment_id,
         created_at=now_str(),
         input_image=rgb,

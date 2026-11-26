@@ -41,6 +41,35 @@ def test_agent_import_uses_scribble_resolution_for_photo_and_crops(tmp_path, mon
     assert reopened.json()['payload']['view'] == item['view']
 
 
+def test_independent_project_copy_keeps_its_identity_when_reopened_or_reimported(tmp_path, monkeypatch):
+    from backend import main
+    from backend.runner import compute_image_id
+    monkeypatch.setattr(library_store, 'LIBRARY_DIR', tmp_path / 'library')
+    monkeypatch.setattr(main, '_project_for_upload', lambda pid: {'project_id': pid})
+    client = TestClient(app)
+    sid = client.post('/api/session/new').json()['payload']['session_id']
+    photo = np.zeros((32, 32, 3), dtype=np.uint8)
+    buf = BytesIO()
+    Image.fromarray(photo).save(buf, format='PNG')
+
+    def upload(project, independent=False):
+        response = client.post('/api/agent/images/import', files={'file': ('same.png', buf.getvalue())},
+                               data={'session_id': sid, 'project_id': project, 'independent_copy': independent})
+        response.raise_for_status()
+        return response.json()['payload']['image_id']
+
+    original = upload('control')
+    copy = upload('trial', True)
+    assert copy != original and upload('trial') == copy and upload('control') == original
+    assert compute_image_id(photo + 1, copy) != copy
+    response = client.post('/api/library/load', json={'session_id': sid, 'image_id': copy})
+    assert response.json()['payload']['image_id'] == copy
+    for iid, project in [(original, 'control'), (copy, 'trial')]:
+        rgb, meta = library_store.load_library_image(iid)
+        np.testing.assert_array_equal(rgb, photo)
+        assert meta['project_ids'] == [project]
+
+
 def test_editor_zoom_reads_the_native_run_photo(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_mode, 'ROOT', tmp_path)
     run_id = 'a' * 32

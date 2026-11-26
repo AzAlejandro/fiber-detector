@@ -5,6 +5,13 @@ All notable changes to LOCO Detector will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-11-26
+
+- El modo Agente está activo por defecto. En Configuración → Conexión se puede elegir GPT-6.2 Sol (predeterminado) o GPT-6.2 Astra para los nuevos subagentes.
+- Análisis permite seleccionar por nombre el proyecto que se revisa y lo identifica con un indicador verde.
+- Al importar con el agente se puede crear una copia independiente por proyecto. Cada ensayo conserva sus propios trazos, calibraciones y mediciones.
+- La guía y el editor de calibración indican cómo marcar un tramo entre graduaciones consecutivas y usar el valor definido para ese tramo en el proyecto.
+
 ## [1.1.2] â€” 2026-11-25
 
 ### VersiÃ³n de prueba de escritorio

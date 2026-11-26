@@ -36,6 +36,7 @@ from .library_store import (
     load_library_image,
     load_library_mask_thumbnail,
     load_library_thumbnail,
+    project_image_id,
     register_library_image,
     save_prior_cache,
 )
@@ -315,7 +316,8 @@ def _load_image_from_path_to_session(sess, path: Path, scale_percent: float = 10
 
     sess.image_rgb = rgb
     sess.image_name = str(path.name)
-    sess.image_id = compute_image_id(rgb)
+    active_project = get_active_project()
+    sess.image_id = project_image_id(compute_image_id(rgb), active_project)
     sess.gt_mask = None
     sess.touch()
     source_mtime = ''
@@ -323,7 +325,6 @@ def _load_image_from_path_to_session(sess, path: Path, scale_percent: float = 10
         source_mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
     except Exception:
         source_mtime = ''
-    active_project = get_active_project()
     project_tags, project_ids, structured_tags = project_tags_for_image(active_project)
     register_library_image(
         sess.image_id,
@@ -381,6 +382,7 @@ def _load_uploaded_image_to_session(
     source_label: str = '',
     native_resolution: bool = False,
     agent_view: bool = False,
+    independent_copy: bool = False,
 ) -> dict[str, Any]:
     if not raw:
         raise HTTPException(status_code=400, detail='Archivo de imagen vacio.')
@@ -401,7 +403,7 @@ def _load_uploaded_image_to_session(
 
     sess.image_rgb = rgb
     sess.image_name = name
-    sess.image_id = compute_image_id(rgb)
+    sess.image_id = project_image_id(compute_image_id(rgb), project, independent_copy)
     sess.gt_mask = None
     sess.touch()
 
@@ -637,6 +639,7 @@ def _execute_single_run(
         experiment_id=experiment_id,
         image_rgb=sess.image_rgb,
         labels=labels_effective,
+        library_id=sess.image_id,
         params=params,
         gt_mask=gt,
         exclude_rect=exclude_rect.model_dump() if exclude_rect else None,
@@ -706,10 +709,10 @@ async def api_image_load(
 
     sess.image_rgb = rgb
     sess.image_name = str(file.filename or 'image')
-    sess.image_id = compute_image_id(rgb)
+    active_project = get_active_project()
+    sess.image_id = project_image_id(compute_image_id(rgb), active_project)
     sess.gt_mask = gt
     sess.touch()
-    active_project = get_active_project()
     project_tags, project_ids, structured_tags = project_tags_for_image(active_project)
     register_library_image(sess.image_id, sess.image_name, rgb, tags=project_tags, project_ids=project_ids, structured_tags=structured_tags)
 
@@ -771,7 +774,7 @@ def api_library_load(req: LibraryLoadReq) -> dict[str, Any]:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    loaded_id = compute_image_id(rgb)
+    loaded_id = compute_image_id(rgb, image_id)
     sess.image_rgb = rgb
     sess.image_name = str(meta.get('image_name') or 'image')
     sess.image_id = loaded_id
@@ -953,10 +956,13 @@ async def api_local_image_upload_browser(
 
 
 @app.post('/api/agent/images/import')
-async def import_agent_image(session_id: str = Form(), file: UploadFile = File(), project_id: str = Form('')):
+async def import_agent_image(session_id: str = Form(), file: UploadFile = File(), project_id: str = Form(''),
+                             independent_copy: bool = Form(False)):
+    if independent_copy and not project_id.strip():
+        raise HTTPException(422, 'Selecciona el proyecto para la copia independiente.')
     payload = _load_uploaded_image_to_session(
         _require_session(session_id), await file.read(), file.filename, project_id=project_id,
-        agent_view=True)
+        agent_view=True, independent_copy=independent_copy)
     return _ok('Imagen lista para el agente.', payload=payload)
 
 

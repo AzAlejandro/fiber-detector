@@ -42,8 +42,6 @@ export default function CalibrationPanel({
         Calibracion de Escala
       </h3>
 
-      <p className="small calibration-help">Siempre activa para esta imagen. Dibuja la barra de escala y guarda el factor.</p>
-
       <div className="calibration-fields">
         <label className="field">
           <span>Unidad</span>
@@ -91,7 +89,7 @@ export default function CalibrationPanel({
       </div>
 
       <p className="small calibration-help">
-        Dibuja una linea horizontal sobre la barra de escala en la imagen TEM. La longitud en px se calcula sola.
+        En una regla graduada, marca un tramo entre dos marcas consecutivas e ingresa la longitud de ese tramo. En una barra simple, marca ambos extremos e ingresa la longitud total.
       </p>
 
       <div className="calibration-actions">

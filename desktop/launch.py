@@ -1,5 +1,6 @@
 """Entry point shipped alongside backend/, vendor/ and frontend/dist/."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -57,7 +58,7 @@ def stop():
 
 
 def serve(show_browser):
-    with socket.socket() as sock:
+    with socket.socket() as sock, ExitStack() as listeners:
         if sys.platform == 'win32':
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         else:
@@ -73,6 +74,23 @@ def serve(show_browser):
                 time.sleep(.25)
             raise RuntimeError(f'El puerto local {PORT} está ocupado.')
 
+        sockets = [sock]
+        ports = [PORT]
+        alias_config = HOME_DIR / 'desktop-alias-port'
+        if alias_config.is_file():
+            alias = int(alias_config.read_text().strip())
+            if alias != PORT and 1024 <= alias <= 65535:
+                extra = listeners.enter_context(socket.socket())
+                if sys.platform == 'win32':
+                    extra.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                try:
+                    extra.bind(('127.0.0.1', alias))
+                except OSError as exc:
+                    print(f'Puerto alternativo {alias} no disponible: {exc}', file=sys.stderr)
+                else:
+                    sockets.append(extra)
+                    ports.append(alias)
+        origins = {f'http://{host}:{port}' for port in ports for host in ('127.0.0.1', 'localhost')}
         from fastapi import HTTPException, Request
         from fastapi.responses import Response
         from fastapi.staticfiles import StaticFiles
@@ -84,7 +102,7 @@ def serve(show_browser):
         @app.middleware('http')
         async def check_origin(request: Request, call_next):
             origin = request.headers.get('origin')
-            if origin and origin not in (BASE, f'http://localhost:{PORT}'):
+            if origin and origin not in origins:
                 return Response(status_code=403)
             return await call_next(request)
 
@@ -112,7 +130,7 @@ def serve(show_browser):
                     webbrowser.open(BASE)
             Thread(target=open_when_ready, daemon=True).start()
         try:
-            server.run(sockets=[sock])
+            server.run(sockets=sockets)
         finally:
             TOKEN_FILE.unlink(missing_ok=True)
 

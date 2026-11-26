@@ -1,7 +1,7 @@
 {
   "name": "loco-detector-frontend",
   "private": true,
-  "version": "1.1.2",
+  "version": "1.2.0",
   "type": "module",
   "description": "LOCO Detector frontend — React UI for circle detection and diameter measurement",
   "scripts": {

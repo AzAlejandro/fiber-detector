@@ -1,6 +1,7 @@
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import PlainTextResponse
 import numpy as np
 from PIL import Image
@@ -8,12 +9,43 @@ from PIL import Image
 from . import agent_masks, agent_mode
 from .agent_targets import AgentTargets, comparison
 from .agent_worklist import image_summary
-from .paths import PROJECT_ROOT
+from .paths import DATA_HOME, PROJECT_ROOT
 from .projects_store import list_projects
 
 router = APIRouter(prefix='/api/agent', tags=['Modo agente'])
 GUIDES = PROJECT_ROOT / '.agents' / 'skills' / 'loco-inicio'
 REVIEW_GUIDE = GUIDES.parent / 'loco-revision' / 'SKILL.md'
+AGENT_MODEL_PATH = DATA_HOME / 'data' / 'agent-model.txt'
+DEFAULT_AGENT_MODEL = 'gpt-6.2-sol'
+AGENT_MODELS = {DEFAULT_AGENT_MODEL: 'GPT-6.2 Sol', 'gpt-6.2-astra': 'GPT-6.2 Astra'}
+
+
+def selected_agent_model():
+    try:
+        saved = AGENT_MODEL_PATH.read_text(encoding='utf8').strip()
+    except FileNotFoundError:
+        return DEFAULT_AGENT_MODEL
+    return saved if saved in AGENT_MODELS else DEFAULT_AGENT_MODEL
+
+
+@router.get('/model')
+def agent_model():
+    return dict(model=selected_agent_model(), default=DEFAULT_AGENT_MODEL, options=AGENT_MODELS)
+
+
+@router.post('/model')
+def set_agent_model(model: str = Body(embed=True)):
+    if model not in AGENT_MODELS:
+        raise HTTPException(422, 'Selecciona un modelo de la lista.')
+    AGENT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=AGENT_MODEL_PATH.parent, delete=False) as pending:
+        pending.write(model.encode('utf8'))
+    path = Path(pending.name)
+    try:
+        path.replace(AGENT_MODEL_PATH)
+    finally:
+        path.unlink(missing_ok=True)
+    return agent_model()
 
 
 @router.get('/connection')
@@ -22,7 +54,7 @@ def connection():
     ready = all(path.is_file() for path in (GUIDES / 'SKILL.md', GUIDES / 'references/herramientas.md', REVIEW_GUIDE))
     return dict(application='LOCO Detector', version=version_file.read_text().strip() if version_file.exists() else 'desarrollo',
                 protocol=1, engine='ok', skill='loco-inicio' if ready else None, ready=ready,
-                active_project_id=list_projects()['active_project_id'])
+                active_project_id=list_projects()['active_project_id'], agent_model=selected_agent_model())
 
 
 @router.get('/guide', response_class=PlainTextResponse)
@@ -30,7 +62,10 @@ def guide(tools: bool = False, review: bool = False):
     path = REVIEW_GUIDE if review else GUIDES / ('references/herramientas.md' if tools else 'SKILL.md')
     if not path.is_file():
         raise HTTPException(404, 'Skill ausente en esta instalación.')
-    return path.read_text(encoding='utf8')
+    content = path.read_text(encoding='utf8')
+    if not tools and not review:
+        content += f'\nModelo configurado para los próximos subagentes: `{selected_agent_model()}`.\n'
+    return content
 
 
 @router.get('/worklist')

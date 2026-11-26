@@ -11,6 +11,7 @@ import { detectCircleContacts } from './agentEdges.mjs'
 import { circleFromDiameter } from './circleGeometry.mjs'
 import AgentTraining from './components/AgentTraining'
 import AgentTargets from './components/AgentTargets'
+import AgentModelSetting from './components/AgentModelSetting'
 import CalibrationPanel from './components/CalibrationPanel'
 import ImageScaleCell from './components/ImageScaleCell'
 import ScalePhotoDialog from './components/ScalePhotoDialog'
@@ -677,6 +678,11 @@ function tagsToText(items = []) {
   return (Array.isArray(items) ? items : []).join(', ')
 }
 
+function projectAnalysisTags(project) {
+  return normalizeStructuredTags(project?.structured_tags || project?.tags || [])
+    .filter(tag => ['project', 'fiber_type', 'creator'].includes(tag.category))
+}
+
 function normalizeStructuredTags(items = []) {
   const rawItems = Array.isArray(items) ? items : String(items || '').split(',')
   const seen = new Set()
@@ -1183,7 +1189,7 @@ export default function App() {
     document.documentElement.style.zoom = String(interfaceZoom / 100)
     window.localStorage.setItem('loco.interfaceZoom', String(interfaceZoom))
   }, [interfaceZoom])
-  const [agentOnly, setAgentOnly] = useState(() => window.localStorage.getItem('loco.agentOnlyNavigation') === 'true')
+  const [agentOnly, setAgentOnly] = useState(() => window.localStorage.getItem('loco.agentOnlyNavigation') !== 'false')
   const [agentConnection, setAgentConnection] = useState('')
   const [activeGroup, setActiveGroup] = useState(() => legacyToGroup('projectSelect').group)
   const [activeTab, setActiveTab] = useState(() => legacyToGroup('projectSelect').tab)
@@ -1494,6 +1500,7 @@ export default function App() {
   const [diamAnalysisUnit, setDiamAnalysisUnit] = useState('nm')
   const [diamAnalysisIncludeUncalibrated, setDiamAnalysisIncludeUncalibrated] = useState(false)
   const [diamAnalysisImageView, setDiamAnalysisImageView] = useState('active')
+  const [reviewProjectId, setReviewProjectId] = useState('')
   const [diamAnalysisSelectedImages, setDiamAnalysisSelectedImages] = useState({})
   const [diamAnalysisSelectedTags, setDiamAnalysisSelectedTags] = useState([])
   const [diamAnalysisResult, setDiamAnalysisResult] = useState(null)
@@ -1625,33 +1632,43 @@ export default function App() {
     })
   }, [savedImages, projectImageView, activeProjectId])
 
+  const reviewProject = projects.find(project => project.project_id === reviewProjectId) || activeProject
+  const analysisProjectId = reviewProject?.project_id || ''
+  const analysisScope = analysisProjectId ? diamAnalysisImageView : 'all'
+  const analysisViewValue = analysisScope === 'active' ? `project:${analysisProjectId}` : analysisScope
+  const analysisViewLabel = analysisScope === 'active' ? reviewProject.name : projectImageViewLabel(analysisScope)
+
   const diamAnalysisImages = useMemo(() => {
-    if (diamAnalysisImageView === 'all' || !activeProjectId) return savedImages
+    if (diamAnalysisImageView === 'all' || !analysisProjectId) return savedImages
     return savedImages.filter((img) => {
       const projectIds = Array.isArray(img.project_ids) ? img.project_ids : []
-      const inActiveProject = projectIds.includes(activeProjectId)
+      const inActiveProject = projectIds.includes(analysisProjectId)
       return diamAnalysisImageView === 'other' ? !inActiveProject : inActiveProject
     })
-  }, [savedImages, diamAnalysisImageView, activeProjectId])
+  }, [savedImages, diamAnalysisImageView, analysisProjectId])
 
   const activeProjectAnalysisTags = useMemo(
-    () => normalizeStructuredTags(activeProject?.structured_tags || activeProject?.tags || []).filter((tag) => ['project', 'fiber_type', 'creator'].includes(tag.category)),
+    () => projectAnalysisTags(activeProject),
     [activeProject],
+  )
+
+  const reviewProjectTags = useMemo(
+    () => projectAnalysisTags(reviewProject),
+    [reviewProject],
   )
 
   const diamAnalysisRequiredTags = useMemo(
     () => {
       if (diamAnalysisSelectedTags.length) return normalizeStructuredTags(diamAnalysisSelectedTags)
-      if (diamAnalysisImageView === 'all') return []
-      return normalizeStructuredTags(activeProjectAnalysisTags)
+      return diamAnalysisImageView === 'active' ? reviewProjectTags : []
     },
-    [diamAnalysisSelectedTags, activeProjectAnalysisTags, diamAnalysisImageView],
+    [diamAnalysisSelectedTags, reviewProjectTags, diamAnalysisImageView],
   )
 
   const diamAnalysisSuggestedTags = useMemo(() => {
     const seen = new Set()
     return normalizeStructuredTags([
-      ...activeProjectAnalysisTags,
+      ...reviewProjectTags,
       ...(projectTagCatalog.fiber_type || []).map((label) => ({ category: 'fiber_type', label })),
       ...(projectTagCatalog.creator || []).map((label) => ({ category: 'creator', label })),
     ]).filter((tag) => {
@@ -1660,7 +1677,7 @@ export default function App() {
       seen.add(key)
       return true
     })
-  }, [activeProjectAnalysisTags, projectTagCatalog])
+  }, [reviewProjectTags, projectTagCatalog])
 
   const modelDatasetRequiredTags = useMemo(
     () => normalizeStructuredTags(modelDatasetSelectedTags),
@@ -3774,7 +3791,7 @@ export default function App() {
     diamAnalysisUnit,
     diamAnalysisIncludeUncalibrated,
     diamAnalysisImageView,
-    activeProjectId,
+    analysisProjectId,
     diamAnalysisSelectionKey,
     diamAnalysisTagKey,
     diamMeasurementSummaryByImage,
@@ -4408,6 +4425,11 @@ export default function App() {
     const nextActiveProject = payload?.active_project || nextProjects.find((project) => project.project_id === nextActiveId) || null
     setProjects(nextProjects)
     setActiveProjectId(nextActiveId)
+    if (nextActiveId !== activeProjectId) {
+      setReviewProjectId('')
+      setDiamAnalysisSelectedImages({})
+      setDiamAnalysisSelectedTags([])
+    }
     if (nextActiveProject) {
       setProjectForm({
         project_id: String(nextActiveProject.project_id || ''),
@@ -8114,7 +8136,7 @@ export default function App() {
   function diameterAnalysisFilters() {
     return {
       image_ids: selectedDiamAnalysisImageIds.length ? selectedDiamAnalysisImageIds : ['__no_selected_images__'],
-      project_ids: diamAnalysisImageView === 'all' ? [] : (activeProjectId ? [activeProjectId] : []),
+      project_ids: diamAnalysisImageView === 'active' && analysisProjectId ? [analysisProjectId] : [],
       structured_tags: diamAnalysisRequiredTags,
     }
   }
@@ -8210,14 +8232,15 @@ export default function App() {
 
   async function saveDiameterAnalysis() {
     const name = String(diamAnalysisName || '').trim() || `Analisis diametros ${new Date().toISOString().slice(0, 10)}`
+    const filters = diameterAnalysisFilters()
     await withLoad('diamAnalysis', async () => {
       try {
         const res = await apiPost('/api/diameter-research/analysis/save', {
           name,
-          filters: diameterAnalysisFilters(),
+          filters,
           unit: diamAnalysisUnit,
           include_uncalibrated: diamAnalysisIncludeUncalibrated,
-          project_ids: activeProjectId ? [activeProjectId] : [],
+          project_ids: filters.project_ids,
           structured_tags: [{ category: 'analysis', label: name }],
           chart_config: diamAnalysisChart,
         })
@@ -9328,7 +9351,7 @@ export default function App() {
       return
     }
     setDiamViewerMode('calibration')
-    toast('success', 'Calibracion', 'Dibuja una linea sobre la barra de escala.')
+    toast('success', 'Calibracion', 'Marca dos graduaciones consecutivas o los extremos de una barra simple.')
   }
 
   // --- Calibration functions ---
@@ -12253,14 +12276,31 @@ export default function App() {
             <>
               <section className="card">
                 <h2>Seleccion de imagenes</h2>
-                <div className="kpi">Proyecto: <strong>{activeProject?.name || 'Todas las imagenes'}</strong></div>
+                <div className="kpi">{analysisScope === 'other' ? 'Fuera del proyecto' : 'Vista'}: <strong>{analysisScope === 'other' ? reviewProject.name : analysisViewLabel}</strong></div>
                 <div className="kpi">Imagenes con mediciones: <strong>{diamAnalysisSelectableImages.length}</strong></div>
                 <div className="kpi">Imagenes seleccionadas: <strong>{selectedDiamAnalysisImageIds.length}</strong></div>
                 <label className="field">
                   <span>vista de imagenes</span>
-                  <select value={diamAnalysisImageView} onChange={(e) => setDiamAnalysisImageView(e.target.value)} disabled={!activeProjectId}>
-                    <option value="active">Proyecto activo</option>
-                    <option value="other">Otras imagenes</option>
+                  <select value={analysisViewValue} onChange={(e) => {
+                    const view = e.target.value
+                    if (view.startsWith('project:')) {
+                      setReviewProjectId(view.slice('project:'.length))
+                      setDiamAnalysisImageView('active')
+                    } else {
+                      setDiamAnalysisImageView(view)
+                    }
+                    setDiamAnalysisSelectedImages({})
+                    setDiamAnalysisSelectedTags([])
+                    setDiamAnalysisResult(null)
+                  }}>
+                    {projects.map(project => {
+                      const value = `project:${project.project_id}`
+                      const reviewing = value === analysisViewValue
+                      return <option key={value} value={value} aria-label={reviewing ? `${project.name}, en revisión` : project.name}>
+                        {reviewing ? '🟢 ' : ''}{project.name}
+                      </option>
+                    })}
+                    <option value="other" disabled={!analysisProjectId}>Otras imagenes</option>
                     <option value="all">Todas</option>
                   </select>
                 </label>
@@ -12287,7 +12327,7 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <button onClick={() => setDiamAnalysisSelectedTags([])}>{diamAnalysisImageView === 'all' ? 'Limpiar tags' : 'Volver a tags del proyecto'}</button>
+                <button onClick={() => setDiamAnalysisSelectedTags([])}>{diamAnalysisImageView === 'active' && analysisProjectId ? 'Volver a tags del proyecto' : 'Limpiar tags'}</button>
               </section>
             </>
           ) : workspaceTab === 'diameterAnalysisHistogram' ? (
@@ -14076,7 +14116,7 @@ export default function App() {
               <section>
                 <h2>Analisis de Diametros</h2>
                 <div className="kpi-row">
-                  <span>Vista: <strong>{projectImageViewLabel(diamAnalysisImageView)}</strong></span>
+                  <span>Vista: <strong>{analysisViewLabel}</strong></span>
                   <span>Seleccionables: <strong>{diamAnalysisSelectableImages.length}</strong></span>
                   <span>Seleccionadas: <strong>{selectedDiamAnalysisImageIds.length}</strong></span>
                   <span>Mediciones internas: <strong>{selectedDiamAnalysisMeasurementSummary.measurement_count}</strong></span>
@@ -15652,6 +15692,7 @@ export default function App() {
                     setAgentOnly(enabled)
                   }} data-tour="settings-agent-mode" />
                 </label>
+                {workspaceTab === 'projectTransfer' && settingsPage === 'Conexión' && <AgentModelSetting />}
                 <label className="settings-zoom">
                   <strong>Zoom de la interfaz</strong>
                   <select value={interfaceZoom} onChange={event => setInterfaceZoom(Number(event.target.value))}>

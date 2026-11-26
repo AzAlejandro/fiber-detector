@@ -657,13 +657,13 @@ def _loco_support_context(req: Any) -> tuple[Any, str, np.ndarray, np.ndarray, n
             rgb, meta = load_library_image(image_id)
             sess.image_rgb = rgb
             sess.image_name = str(meta.get('image_name') or 'image')
-            sess.image_id = compute_image_id(rgb)
+            sess.image_id = compute_image_id(rgb, image_id)
             sess.gt_mask = None
             sess.touch()
         except FileNotFoundError:
             pass
     sess = _require_active_image(req.session_id, image_id)
-    image_check = compute_image_id(sess.image_rgb)
+    image_check = compute_image_id(sess.image_rgb, image_id)
     if image_check != image_id:
         raise HTTPException(status_code=400, detail='image_id no corresponde al contenido de imagen activo.')
 
@@ -3991,7 +3991,7 @@ def loco_dataset_circles_clear(req: LocoDatasetCirclesReq) -> dict[str, Any]:
 def run(req: RunReq) -> dict[str, Any]:
     sess = _require_active_image(req.session_id, req.image_id)
     image_id = str(req.image_id or '').strip()
-    image_check = compute_image_id(sess.image_rgb)
+    image_check = compute_image_id(sess.image_rgb, image_id)
     if image_check != image_id:
         raise HTTPException(status_code=400, detail='image_id no corresponde al contenido de imagen activo.')
 
@@ -4285,7 +4285,7 @@ def run(req: RunReq) -> dict[str, Any]:
 def loco_preview(req: LocoPreviewReq) -> dict[str, Any]:
     sess = _require_active_image(req.session_id, req.image_id)
     image_id = str(req.image_id or '').strip()
-    image_check = compute_image_id(sess.image_rgb)
+    image_check = compute_image_id(sess.image_rgb, image_id)
     if image_check != image_id:
         raise HTTPException(status_code=400, detail='image_id no corresponde al contenido de imagen activo.')
 

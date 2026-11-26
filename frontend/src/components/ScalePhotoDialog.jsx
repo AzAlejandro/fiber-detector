@@ -193,8 +193,9 @@ export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
         </div>}
     </div>
     {editing && <form className="scale-photo-form" onSubmit={save}>
-      <p>{drawing ? (preview ? 'Marca el segundo extremo.' : 'Marca los dos extremos de la barra con dos clics o arrastra de uno al otro.')
-        : 'Arrastra un extremo para ajustar la longitud horizontal o el tramo amarillo para mover toda la barra.'}</p>
+      <p>{drawing ? (preview ? 'Marca el segundo extremo.' : 'Marca dos graduaciones consecutivas o los extremos de una barra simple.')
+        : 'Arrastra los extremos para ajustar la línea o el tramo amarillo para moverla.'}</p>
+      <p>Ingresa el valor de un tramo según la calibración del proyecto. Por ejemplo, si cada tramo vale 1 µm, marca dos divisiones consecutivas e ingresa 1 µm.</p>
       <label>Longitud conocida <input aria-label="Valor de escala" inputMode="decimal" value={value} disabled={busy}
         onChange={e => setValue(e.target.value)} /></label>
       <label>Unidad <select aria-label="Unidad de escala" value={unitCode} disabled={busy} onChange={e => {

@@ -27,14 +27,15 @@ def run(base):
         return client.get('/api/agent/guide', params={'tools': herramientas, 'review': revision}).raise_for_status().text
 
     @mcp.tool()
-    def importar_imagen(archivo: str, proyecto: str) -> dict:
+    def importar_imagen(archivo: str, proyecto: str, copia_independiente: bool = False) -> dict:
         """Importar el archivo local de microscopía elegido por el usuario."""
         path = Path(archivo)
         if not path.is_absolute() or path.suffix.lower() not in ('.tiff','.tif','.png','.jpeg','.jpg','.bmp'):
             raise ValueError('Se requiere la ruta absoluta de una imagen de LOCO.')
         sid = client.post('/api/session/new', json={}).raise_for_status().json()['payload']['session_id']
         with path.open('rb') as f:
-            res = client.post('/api/agent/images/import', data={'session_id': sid,'project_id': proyecto},
+            res = client.post('/api/agent/images/import', data={'session_id': sid, 'project_id': proyecto,
+                               'independent_copy': str(copia_independiente).lower()},
                               files={'file': (path.name, f)})
         return res.raise_for_status().json()['payload']
 

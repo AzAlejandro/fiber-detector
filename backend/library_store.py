@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from datetime import datetime
@@ -43,6 +44,16 @@ def _img_dir(image_id: str) -> Path:
 
 def _meta_path(image_id: str) -> Path:
     return _img_dir(image_id) / 'meta.json'
+
+
+def project_image_id(content_id: str, project: dict[str, Any] | None, independent_copy: bool = False) -> str:
+    project_id = (project or {}).get('project_id')
+    if project_id:
+        suffix = hashlib.sha256(project_id.encode()).hexdigest()[:12]
+        copy_id = f'{content_id}__{suffix}'
+        if independent_copy or project_id in _load_json(_meta_path(copy_id)).get('project_ids', []):
+            return copy_id
+    return content_id
 
 
 def _prior_meta_path(image_id: str) -> Path:
