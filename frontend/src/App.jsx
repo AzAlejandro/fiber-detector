@@ -12,6 +12,7 @@ import { circleFromDiameter } from './circleGeometry.mjs'
 import AgentTraining from './components/AgentTraining'
 import AgentTargets from './components/AgentTargets'
 import AgentModelSetting from './components/AgentModelSetting'
+import ProcessingSettings from './components/ProcessingSettings'
 import CalibrationPanel from './components/CalibrationPanel'
 import ImageScaleCell from './components/ImageScaleCell'
 import ScalePhotoDialog from './components/ScalePhotoDialog'
@@ -1336,6 +1337,7 @@ export default function App() {
     ? 'agent:' + savedCircleBatch.agentRun : ''
   const agentMaskActive = workspaceTab === 'diameter' && useAgentMask && !!agentPriorId
   const diamPriorRunId = agentMaskActive ? agentPriorId : standardPriorRunId
+  const maskLineLabel = agentMaskActive ? 'Línea agente' : 'Línea máscara'
   const [diamManualHistory, setDiamManualHistory] = useState([])
   const [diamManualFuture, setDiamManualFuture] = useState([])
   const [diamPoints, setDiamPoints] = useState([])
@@ -6072,17 +6074,6 @@ export default function App() {
     })
   }
 
-  function consumeDiameterManualCircle() {
-    diamCircleDragRef.current = { dragging: false, center: null, geometry_id: '', pointerId: null }
-    setManualCircleDraft(null)
-    setManualCircles((prev) => prev.map((circle) => ({ ...circle, consumed: true })))
-    setManualCircleActiveIdx(-1)
-    setManualCircleSelected(false)
-    setManualCircleConsumed(true)
-    setDiamViewerMode('circle')
-    setDiamParams((prev) => ({ ...prev, circle_square_seed_mode: 'manual_circle' }))
-  }
-
   function rememberLocoState() {
     setLocoHistory((prev) => [...prev.slice(-24), { points: locoPoints, active: locoActivePointIdx, circle: locoCircleDraft }])
     setLocoFuture([])
@@ -9351,7 +9342,7 @@ export default function App() {
       return
     }
     setDiamViewerMode('calibration')
-    toast('success', 'Calibracion', 'Marca dos graduaciones consecutivas o los extremos de una barra simple.')
+    toast('success', 'Calibración', 'Marca los dos extremos de la barra completa, desde la primera hasta la última graduación.')
   }
 
   // --- Calibration functions ---
@@ -9701,8 +9692,6 @@ export default function App() {
       }
       return
     }
-    const hideManualCircleAfterRun = !editorRun && !selectedCircles && batches.some((batch) => batch.method_id === 'circle_square_mask_diameter')
-    if (hideManualCircleAfterRun) consumeDiameterManualCircle()
     await withLoad('diamRun', async () => {
       try {
         const responses = []
@@ -9734,9 +9723,6 @@ export default function App() {
         setDiamResults((prev) => mergeDiameterResults(prev, nextResults))
         if (nextResults.length === 1) selectDiameterResultForReview(nextResults[0], { silent: true, runId: lastRes?.run_id || '' })
         if (lastRes?.overlay_b64) setDiamOverlayUrl(b64ToDataUrl(lastRes.overlay_b64, lastRes.overlay_mime || 'image/png'))
-        if (hideManualCircleAfterRun) {
-          consumeDiameterManualCircle()
-        }
         await refreshDiameterRuns(imageId, { silent: true })
         let savedMeasurementCount = 0
         try {
@@ -10183,9 +10169,7 @@ export default function App() {
       .filter(Boolean)
   }, [diamResults])
   const diameterManualCirclePreviews = useMemo(() => {
-    if (loading.diamRun) return []
     const list = (Array.isArray(manualCircles) ? manualCircles : [])
-      .filter((circle) => !circle?.consumed)
       .filter((circle) => circle?.center && Number.isFinite(Number(circle.radius)))
       .map((circle, idx) => ({ ...circle, idx, radius: Math.max(1, Number(circle.radius) || 1) }))
     if (
@@ -10196,7 +10180,7 @@ export default function App() {
       list.push({ ...manualCircleDraft, idx: -1, radius: Math.max(1, Number(manualCircleDraft.radius) || 1) })
     }
     return list
-  }, [loading.diamRun, manualCircles, manualCircleDraft])
+  }, [manualCircles, manualCircleDraft])
   const activeLocoCircle = useMemo(() => {
     if (locoCircleDraft?.center) return locoCircleDraft
     const point = activeLocoPoint()
@@ -11436,7 +11420,7 @@ export default function App() {
       ) : null}
 
       {projectImageZoom?.reviewScale ? (
-        <ScalePhotoDialog key={projectImageZoom.image_id} photo={projectImageZoom} onSaved={onImageScaleSaved} onClose={() => setProjectImageZoom(null)} />
+        <ScalePhotoDialog key={projectImageZoom.image_id} photo={projectImageZoom} handIcon={<ToolIcon name="hand" />} onSaved={onImageScaleSaved} onClose={() => setProjectImageZoom(null)} />
       ) : projectImageZoom ? (
         <div className="image-preview-modal" role="dialog" aria-modal="true" onDoubleClick={() => setProjectImageZoom(null)}>
           <div className="image-preview-dialog project-image-zoom-dialog" onDoubleClick={(e) => e.stopPropagation()}>
@@ -12038,15 +12022,15 @@ export default function App() {
                     disabled={!imageId}
                   >
                     <option value="circle_square_mask_diameter">Mascara circle-square</option>
-                    <option value="manual_dual_side_caliper">Linea mascara</option>
-                    <option value="manual_line_direct_caliper">Linea manual</option>
+                    <option value="manual_dual_side_caliper">{maskLineLabel}</option>
+                    <option value="manual_line_direct_caliper">Línea manual</option>
                   </select>
                 </label>
                 <p className="small">
                   {diamMethodId === 'circle_square_mask_diameter'
                     ? 'Circle-square usa un circulo manual como semilla y mide sobre la mascara del run de soporte.'
                     : diamMethodId === 'manual_dual_side_caliper'
-                      ? 'Linea mascara corta tu trazo con la mascara y mide solo el tramo respaldado por ella.'
+                      ? `${maskLineLabel} mide el tramo de tu trazo que atraviesa la fibra en la máscara seleccionada.`
                       : diamMethodId === 'manual_line_direct_caliper'
                         ? 'Linea manual usa exactamente la longitud del trazo que dibujas.'
                         : ''}
@@ -12187,7 +12171,7 @@ export default function App() {
                 ) : null}
                 {['manual_dual_side_caliper', 'manual_line_direct_caliper'].includes(diamMethodId) ? (
                   <>
-                    <h3>{diamMethodId === 'manual_dual_side_caliper' ? 'Linea mascara' : 'Linea manual'}</h3>
+                    <h3>{diamMethodId === 'manual_dual_side_caliper' ? maskLineLabel : 'Línea manual'}</h3>
                     <p className="small">
                       {diamMethodId === 'manual_dual_side_caliper'
                         ? 'Mantén click, arrastra y suelta. El diámetro se calcula donde esa dirección corta la máscara.'
@@ -13684,8 +13668,8 @@ export default function App() {
             <h2>Medicion de Diametros</h2>
             <div className="viewer-toolbar">
               <button className={`icon-tool ${diamViewerMode === 'pan' ? 'toggle-active' : ''}`} onClick={() => switchDiameterViewer('pan')} disabled={!imageUrl} title="Mover vista">Mano</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_dual_side_caliper')} disabled={!imageUrl} title="Linea que se corta con la mascara (D)">Linea mascara</button>
-              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_line_direct_caliper')} disabled={!imageUrl} title="Linea 100% manual (X)">Linea manual</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_dual_side_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_dual_side_caliper')} disabled={!imageUrl} title="Medir el tramo dentro de la máscara (D)">{maskLineLabel}</button>
+              <button className={`icon-tool ${diamViewerMode === 'manual' && diamMethodId === 'manual_line_direct_caliper' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('manual_line_direct_caliper')} disabled={!imageUrl} title="Medir entre los extremos (X)">Línea manual</button>
               <button className={`icon-tool ${diamViewerMode === 'circle' ? 'toggle-active' : ''}`} onClick={() => selectDiameterDrawingTool('circle_square_mask_diameter')} disabled={!imageUrl} title="Dibujar circulo semilla (C)">Circulo</button>
               <span className="toolbar-sep" />
               <button className="icon-tool" onClick={undoDiameterManual} disabled={!diamManualHistory.length} title="Deshacer geometria manual (Ctrl+Z)">Deshacer</button>
@@ -15662,13 +15646,14 @@ export default function App() {
           <article className={`card settings-card ${workspaceTab === 'projectTransfer' ? '' : 'hidden-panel'}`} data-tour="workspace-panel-projectTransfer">
             <h1 data-tour="tab-strip-configuration">Configuración</h1>
             <nav className="settings-tabs" aria-label="Secciones de configuración" data-tour="workspace-sidebar-projectTransfer">
-              {['Conexión', 'Objetivos', 'Exportar', 'Importar'].map(page => (
+              {['Conexión', 'Procesamiento', 'Objetivos', 'Exportar', 'Importar'].map(page => (
                 <button key={page} aria-current={settingsPage === page ? 'page' : undefined}
                   data-tour={page === 'Exportar' ? 'tab-projectTransfer' : undefined}
                   onClick={() => setSettingsPage(page)}>{page}</button>
               ))}
             </nav>
             <div className="settings-body">
+              {workspaceTab === 'projectTransfer' && settingsPage === 'Procesamiento' && <ProcessingSettings />}
               <div hidden={settingsPage !== 'Conexión'}>
               <section className="settings-narrow">
                 <h2>Conexión con el agente</h2>

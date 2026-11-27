@@ -204,8 +204,8 @@ def normalize_geometry(geometry: dict[str, Any] | None) -> dict[str, Any]:
         'mask_lines': [item for item in mask_lines if item],
         'direct_lines': [item for item in direct_lines if item],
         'circles': [item for item in circles if item],
-        'mask_line_active_idx': int(raw.get('mask_line_active_idx', raw.get('maskLineActiveIdx', -1)) or -1),
-        'direct_line_active_idx': int(raw.get('direct_line_active_idx', raw.get('directLineActiveIdx', -1)) or -1),
+        'mask_line_active_idx': int(raw.get('mask_line_active_idx', raw.get('maskLineActiveIdx', -1)) or 0) if mask_lines else -1,
+        'direct_line_active_idx': int(raw.get('direct_line_active_idx', raw.get('directLineActiveIdx', -1)) or 0) if direct_lines else -1,
         'circle_active_idx': int(raw.get('circle_active_idx', raw.get('circleActiveIdx', -1)) or -1),
     }
 

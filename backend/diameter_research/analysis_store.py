@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime
+from functools import wraps
+from hashlib import sha256
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 import zipfile
@@ -19,6 +23,16 @@ ANALYSIS_ROOT = scribble_persistence.OUTPUT_ROOT / 'diameter_analysis'
 MEASUREMENTS_PATH = ANALYSIS_ROOT / 'measurements.json'
 ANALYSES_DIR = ANALYSIS_ROOT / 'analyses'
 EXPORTS_DIR = ANALYSIS_ROOT / 'exports'
+_measurements_lock = RLock()
+LINE_METHODS = {'manual_line_direct_caliper', 'manual_dual_side_caliper'}
+
+
+def _measurement_edit(fn):
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        with _measurements_lock:
+            return fn(*args, **kwargs)
+    return locked
 
 
 def _now() -> str:
@@ -141,14 +155,21 @@ def _with_conversions(row: dict[str, Any]) -> dict[str, Any]:
 
 def _load_measurements() -> list[dict[str, Any]]:
     _ensure()
-    payload = _read_json(MEASUREMENTS_PATH)
+    payload = json.loads(MEASUREMENTS_PATH.read_text(encoding='utf-8'))
     return [dict(item or {}) for item in list(payload.get('measurements') or [])]
 
 
 def _save_measurements(rows: list[dict[str, Any]]) -> None:
-    _write_json(MEASUREMENTS_PATH, {'updated_at': _now(), 'measurements': rows})
+    with NamedTemporaryFile(dir=MEASUREMENTS_PATH.parent, delete=False) as f:
+        temp = Path(f.name)
+    try:
+        _write_json(temp, {'updated_at': _now(), 'measurements': rows})
+        temp.replace(MEASUREMENTS_PATH)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
+@_measurement_edit
 def update_measurements_calibration_for_image(image_id: str, calibration: dict[str, Any] | None) -> dict[str, Any]:
     target_image_id = str(image_id or '').strip()
     if not target_image_id:
@@ -168,6 +189,7 @@ def update_measurements_calibration_for_image(image_id: str, calibration: dict[s
     return {'image_id': target_image_id, 'updated_count': updated_count}
 
 
+@_measurement_edit
 def save_measurements_from_run(run_id: str, calibration: dict[str, Any] | None = None) -> dict[str, Any]:
     _ensure()
     run = drp.load_diameter_run(str(run_id or '').strip())
@@ -176,7 +198,19 @@ def save_measurements_from_run(run_id: str, calibration: dict[str, Any] | None =
     existing = _load_measurements()
     by_id = {str(item.get('measurement_id') or ''): item for item in existing if item.get('measurement_id')}
     saved: list[dict[str, Any]] = []
+    prior = (run.get('meta') or {}).get('prior_run_id') or ''
+    editor = drp.load_points('agent_editor_' + prior[6:]) if prior.startswith('agent:') else {}
+    line_ids = {line['geometry_id'] for key in ('mask_lines', 'direct_lines') for line in editor.get('geometry', {}).get(key, [])}
     for idx, result in enumerate(list(run.get('results') or [])):
+        method = result.get('method_id') or (run.get('meta') or {}).get('method_id') or run.get('experiment_id')
+        gid = result.get('interactive_geometry_id') or result.get('manual_geometry_id')
+        if method in LINE_METHODS and gid and editor.get('found'):
+            if gid not in line_ids:
+                continue
+            current = next((r for r in existing if r.get('agent_run') == prior[6:] and r.get('geometry_id') == gid), None)
+            if current:
+                saved.append(current)
+                continue
         if result.get('diameter_px') is None:
             continue
         measurement_id = _measurement_id(str(run.get('run_id') or run_id), result, idx)
@@ -208,6 +242,67 @@ def save_measurements_from_run(run_id: str, calibration: dict[str, Any] | None =
     merged.sort(key=lambda item: (str(item.get('image_id') or ''), str(item.get('created_at') or ''), int(item.get('point_index') or 0)))
     _save_measurements(merged)
     return {'image_id': image_id, 'run_id': run_id, 'saved_count': len(saved), 'measurements': saved}
+
+
+@_measurement_edit
+def sync_agent_lines(run_id, image_id, geometry, measure, calibration, removed_ids=()):
+    """The editor geometry determines which human-drawn lines are included in Analysis."""
+    rows = _load_measurements()
+    unchanged = []
+    previous = {}
+    legacy_runs = {}
+    lines = geometry['mask_lines'] + geometry['direct_lines']
+    known_ids = {line['geometry_id'] for line in lines}.union(removed_ids)
+    for row in rows:
+        if row.get('image_id') == image_id and row.get('method_id') in LINE_METHODS:
+            owner, gid = row.get('agent_run'), row.get('geometry_id')
+            if owner is None and row.get('run_id'):
+                rid = row['run_id']
+                if rid not in legacy_runs:
+                    legacy_runs[rid] = _read_json(drp.RUNS_DIR / rid / 'meta.json')
+                old = legacy_runs[rid]
+                results = old.get('results', [])
+                idx = row.get('point_index', -1)
+                if old.get('meta', {}).get('prior_run_id') == 'agent:' + run_id and 0 <= idx < len(results):
+                    gid = results[idx].get('interactive_geometry_id') or results[idx].get('manual_geometry_id')
+                    if gid in known_ids:
+                        owner = run_id
+            if owner == run_id and gid:
+                previous[gid] = row
+                continue
+        unchanged.append(row)
+
+    current = {}
+    meta = None
+    for key in ('mask_lines', 'direct_lines'):
+        for line in geometry[key]:
+            gid = line['geometry_id']
+            if not gid:
+                continue
+            endpoints = [line['start'], line['end']]
+            old = previous.get(gid, {})
+            if old.get('line_endpoints') == endpoints:
+                current[gid] = old
+                continue
+            if meta is None:
+                meta = _image_meta_by_id().get(image_id, {})
+                scale = calibration()
+            data = measure(line)
+            token = sha256((run_id + '/' + gid).encode()).hexdigest()
+            current[gid] = _with_conversions({
+                **old, 'measurement_id': old.get('measurement_id') or 'line_' + token,
+                'image_id': image_id, 'image_name': meta.get('image_name', image_id),
+                'method_id': line['method_id'], 'agent_run': run_id, 'geometry_id': gid, 'line_endpoints': endpoints,
+                'run_id': old.get('run_id', '') if not old.get('line_endpoints') else '',
+                'created_at': old.get('created_at') or _now(), 'saved_at': _now(), 'point_index': old.get('point_index', 0),
+                'x': (endpoints[0]['x'] + endpoints[1]['x']) / 2, 'y': (endpoints[0]['y'] + endpoints[1]['y']) / 2,
+                'project_ids': meta.get('project_ids', []), 'tags': meta.get('tags', []),
+                'structured_tags': meta.get('structured_tags', []), 'calibration': scale or {},
+                'status': 'ok', **data,
+            })
+    if current != previous or len(unchanged) + len(current) != len(rows):
+        _save_measurements(unchanged + list(current.values()))
+    return current
 
 
 def _stats(values: list[float]) -> dict[str, Any]:
@@ -362,6 +457,7 @@ def _rewrite_tag_items(items: Any, category: str, old_label: str, new_label: str
     return normalize_structured_tags(out)
 
 
+@_measurement_edit
 def rewrite_analysis_tags(category: str, old_label: str, new_label: str = '', remove: bool = False) -> None:
     _ensure()
     measurements_changed = False
@@ -398,6 +494,7 @@ def rewrite_analysis_tags(category: str, old_label: str, new_label: str = '', re
             _write_json(path, item)
 
 
+@_measurement_edit
 def sync_image_metadata(image_id: str, project_ids: Any = None, tags: Any = None, structured_tags: Any = None) -> None:
     iid = str(image_id or '').strip()
     if not iid:

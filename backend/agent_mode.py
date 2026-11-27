@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
-from typing import Literal
+from typing import Literal, NamedTuple
 from uuid import uuid4
 
 import cv2
@@ -17,13 +17,14 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from skimage.morphology import skeletonize
 
-from .agent_geometry import choose, count_crossings, orientation_fields, proposals
+from .agent_geometry import choose, choose_zoned, count_crossings, orientation_fields, proposals
 from .agent_masks import field_height, load_support
 from .agent_views import overview_response
 from .agent_targets import AgentTargets, comparison, project_targets
 from .image_codec import to_gray_u8
 from .library_store import load_library_image
 from .persistence import OUTPUT_ROOT
+from .processing_settings import ProcessingSettings, processing_settings
 
 router = APIRouter(prefix='/api/agent', tags=['Modo agente'])
 ROOT = OUTPUT_ROOT / 'agent_runs'
@@ -141,6 +142,49 @@ def layer_image(run_id: str, layer: str, overview: bool = False):
     return FileResponse(path, media_type='image/png')
 
 
+class DetectionInput(NamedTuple):
+    profiles: np.ndarray
+    orientation_image: np.ndarray
+    agent_mask: np.ndarray
+    smooth: np.ndarray
+    background: np.ndarray
+    contrast: np.ndarray
+
+
+def _oriented_enhancement(gray):
+    best = np.zeros_like(gray)
+    for sigma in (1.1, 2.2, 3.5):
+        extent = int(np.ceil(6 * sigma))
+        y, x = np.mgrid[-extent:extent + 1, -extent:extent + 1]
+        for angle in np.arange(8) * np.pi / 8:
+            along = x * np.cos(angle) + y * np.sin(angle)
+            across = -x * np.sin(angle) + y * np.cos(angle)
+            envelope = np.exp(-.5 * (along / (2.1 * sigma)) ** 2)
+            core = envelope * np.exp(-.5 * (across / sigma) ** 2)
+            flanks = envelope * (np.exp(-.5 * ((across - 2.2 * sigma) / sigma) ** 2)
+                                 + np.exp(-.5 * ((across + 2.2 * sigma) / sigma) ** 2))
+            kernel = (flanks / flanks.sum() - core / core.sum()).astype(np.float32)
+            best = np.maximum(best, cv2.filter2D(gray, cv2.CV_32F, kernel))
+    return np.clip(gray - .75 * np.minimum(best, 24), 0, 255)
+
+
+def prepare_detection(photo, bottom, background_sigma, threshold, filters: ProcessingSettings):
+    raw = photo.astype(np.float32)
+    smooth = cv2.GaussianBlur(raw, (0, 0), .82) if filters.smooth else raw
+    background = (cv2.GaussianBlur(smooth, (0, 0), background_sigma) if filters.local_background
+                  else np.full_like(smooth, smooth[:bottom].mean()))
+    contrast = background - smooth
+    mask = contrast >= threshold
+    mask[bottom:] = False
+    profiles, orientation_image = smooth, raw
+    if filters.clahe:
+        orientation_image = cv2.createCLAHE(1.8, (12, 12)).apply(photo).astype(np.float32)
+        profiles = cv2.GaussianBlur(orientation_image, (0, 0), .82) if filters.smooth else orientation_image
+    if filters.oriented:
+        profiles = orientation_image = _oriented_enhancement(profiles)
+    return DetectionInput(profiles, orientation_image, mask, smooth, background, contrast)
+
+
 @router.post('/runs', status_code=201)
 def run_agent(req: AgentRequest):
     try:
@@ -155,19 +199,20 @@ def run_agent(req: AgentRequest):
     height, width = photo.shape
     if min(height, width) < 12:
         raise HTTPException(422, 'Imagen demasiado pequeña para detectar fibras.')
-    smooth = cv2.GaussianBlur(photo.astype(np.float32), (0, 0), .82)
-    background = cv2.GaussianBlur(smooth, (0, 0), req.background_sigma)
-    contrast = background - smooth
     bottom = field_height(photo)
-    agent_mask = contrast >= req.threshold
-    agent_mask[bottom:] = False
+    filters = processing_settings()
+    prepared = prepare_detection(photo, bottom, req.background_sigma, req.threshold, filters)
+    agent_mask = prepared.agent_mask
     mask = agent_mask
+    coverage_mask = agent_mask
+    zone_report = None
     inputs = {}
     method = 'contraste_local_v2' if req.circles is None else 'contraste_local_v1'
     if req.mask_source != 'agente':
         if not req.scribble_mask_id:
             raise HTTPException(422, 'Selecciona una máscara de scribble guardada.')
         scribble_mask = load_support(req.scribble_mask_id, req.image_id, req.project_id, photo)
+        coverage_mask = scribble_mask
         inputs['mascara_scribble'] = scribble_mask * 255
         if req.mask_source == 'ambas':
             inputs['mascara_agente'] = agent_mask * 255
@@ -177,8 +222,19 @@ def run_agent(req: AgentRequest):
             mask = scribble_mask
             method = 'mascara_scribble'
     if req.circles is None:
-        candidates = proposals(mask, smooth, bottom, 3.6, orientation_fields(photo))
-        selected = choose(mask, candidates, 9, limit)
+        orientation = orientation_fields(prepared.orientation_image) if filters.alignment else ()
+        candidates = proposals(mask, prepared.profiles, bottom, 3.6, orientation,
+                               alignment=filters.alignment, continuity=filters.continuity)
+        if filters.zoned_sampling:
+            selected, zones = choose_zoned(mask, candidates, 9, limit, prune_spurs=filters.prune_spurs,
+                coverage_mask=coverage_mask, field_height=bottom, rows=filters.zone_rows,
+                columns=filters.zone_columns, redistribute=filters.redistribute_zones)
+            zone_report = dict(rows=filters.zone_rows, columns=filters.zone_columns,
+                               coverage_source='agente' if req.mask_source == 'agente' else 'scribble',
+                               requested=limit, selected=len(selected), redistribute=filters.redistribute_zones,
+                               zones=zones)
+        else:
+            selected = choose(mask, candidates, 9, limit, prune_spurs=filters.prune_spurs)
         circles = [dict(x=x, y=y, radius_px=r, score=score, contrast=strength, stable=stable)
                    for score, x, y, r, strength, stable in selected]
     else:
@@ -195,13 +251,15 @@ def run_agent(req: AgentRequest):
     data = dict(run_id=run_id, image_id=req.image_id, project_id=req.project_id, image_name=meta['image_name'],
                 created_at=datetime.now(timezone.utc).isoformat(), width=width, height=height,
                 source='biblioteca LOCO, gris de 8 bits', photo_sha256=hashlib.sha256(photo.tobytes()).hexdigest(),
-                method=method,
+                method=method, zone_sampling=zone_report,
                 mask_source=req.mask_source, scribble_mask_id=req.scribble_mask_id if inputs else None,
-                parameters=dict(smooth_sigma=.82, background_sigma=req.background_sigma,
+                processing_filters=filters.model_dump(exclude={'diameter_method'}),
+                parameters=dict(smooth_sigma=.82 if filters.smooth else 0, background_sigma=req.background_sigma,
                 threshold=req.threshold, field_height=bottom, limit=limit), layers=(*LAYERS, *inputs),
                 targets=targets.model_dump(), circle_review=comparison(len(circles), targets.circle_count, targets.circle_tolerance),
                 circle_source='automática' if req.circles is None else 'agente', circles=circles)
-    arrays = dict(zip(LAYERS, (photo, smooth, background, 128 + 5 * contrast, mask * 255, skeletonize(mask) * 255)))
+    arrays = dict(zip(LAYERS, (photo, prepared.smooth, prepared.background, 128 + 5 * prepared.contrast,
+                              mask * 255, skeletonize(mask) * 255)))
     arrays.update(inputs)
     ROOT.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=ROOT, prefix='.agent-') as temp:

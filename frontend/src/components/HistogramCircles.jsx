@@ -14,7 +14,7 @@ async function loadRunCircles(runId) {
     const x = seed.circle_square_center_x ?? result.original_xy?.[0] ?? result.x
     const y = seed.circle_square_center_y ?? result.original_xy?.[1] ?? result.y
     if (radius > 0 && Number.isFinite(x) && Number.isFinite(y)) {
-      circles.set(result.point_index, { x, y, radius, id,
+      circles.set(result.point_index, { x, y, radius, id, left: result.left_edge_xy, right: result.right_edge_xy,
         agentRun: prior.startsWith('agent:') ? prior.slice(6) : /^agent_([a-f0-9]{32})_/.exec(id)?.[1] })
     }
   }
@@ -31,7 +31,7 @@ function CirclePhoto({ rows, project, cache, onOpen }) {
   const [busy, setBusy] = useState(false)
   const [chosen, setChosen] = useState('')
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
-  const runIds = JSON.stringify([...new Set(rows.map(row => row.run_id))].sort())
+  const runIds = JSON.stringify([...new Set(rows.map(row => row.run_id).filter(Boolean))].sort())
   useEffect(() => {
     let live = true
     async function load() {
@@ -104,6 +104,9 @@ function CirclePhoto({ rows, project, cache, onOpen }) {
       }} onLostPointerCapture={() => { drag.current = null }}>
       <g transform={`translate(${view.x} ${view.y}) scale(${view.zoom})`}>
         <image href={photo.url} width={photo.width} height={photo.height} />
+        {circles.map(c => c.left && c.right && <line key={c.row.measurement_id}
+          x1={c.left[0]} y1={c.left[1]} x2={c.right[0]} y2={c.right[1]}
+          stroke="#ff6347" strokeWidth={2} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
         {circles.map(c => <circle key={c.row.measurement_id} data-measurement={c.row.measurement_id}
           cx={c.x} cy={c.y} r={c.radius} fill="transparent" stroke={c === selected ? '#ffcf39' : '#00e4f2'}
           strokeWidth={c === selected ? 3 : 2} vectorEffect="non-scaling-stroke" role="button" tabIndex={0}

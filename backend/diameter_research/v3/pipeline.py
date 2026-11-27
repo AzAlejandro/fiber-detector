@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 
 from ...image_codec import to_gray_u8, to_uint8_rgb
+from ...agent_geometry import samples as sample_gray
+from ...processing_settings import processing_settings
 from ..pipeline import DEFAULT_PARAMS as V1_DEFAULT_PARAMS
 from ..pipeline import build_overlay
 from ..pipeline_v2 import build_weighted_support
@@ -1425,12 +1427,49 @@ def _draw_loco_geometry_overlay(image_rgb: np.ndarray, results: list[dict[str, A
     return out
 
 
+def diameter_three_profiles(gray, low, high, center, radius):
+    """Refine the two central endpoints when three neighboring cuts agree."""
+    low, high, center = (np.asarray(v, dtype=float) for v in (low, high, center))
+    middle_left, middle_right = low.mean(axis=0), high.mean(axis=0)
+    window = max(1.1, min(.23 * radius, 3.0))
+    offsets = np.linspace(-window, window, int(np.ceil(8 * window)) + 1)
+    shifts = []
+    for t in (.3, .5, .7):
+        left = (1 - t) * low[0] + t * low[1]
+        right = (1 - t) * high[0] + t * high[1]
+        length = np.linalg.norm(right - left)
+        if length < 1:
+            break
+        normal = (right - left) / length
+        edges = []
+        for point, sign in ((left, -1), (right, 1)):
+            locations = point + offsets[:, None] * normal
+            gradient = sign * (sample_gray(gray, *(locations + .5 * normal).T)
+                               - sample_gray(gray, *(locations - .5 * normal).T))
+            index = int(np.argmax(gradient - .15 * np.abs(offsets)))
+            if gradient[index] < .8 or np.linalg.norm(locations[index] - center) >= radius:
+                break
+            edges.append(float(offsets[index]))
+        if len(edges) == 2:
+            shifts.append(edges)
+    central_span = middle_right - middle_left
+    length = np.linalg.norm(central_span)
+    if length > 1 and len(shifts) == 3 and np.all(np.ptp(shifts, axis=0) <= max(1.25, .2 * radius)):
+        normal = central_span / length
+        dl, dr = np.median(shifts, axis=0)
+        a, b = middle_left + normal * dl, middle_right + normal * dr
+        if np.dot(b - a, normal) > 1 and max(np.linalg.norm(a - center), np.linalg.norm(b - center)) < radius:
+            return a, b, shifts, True
+    return middle_left, middle_right, shifts, False
+
+
 def _circle_square_mask_measurement(
     *,
     support_mask: np.ndarray,
     point_xy: tuple[float, float],
     orientation: dict[str, Any],
     params: dict[str, Any],
+    profile_gray: np.ndarray | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     mask = (np.asarray(support_mask, dtype=np.uint8) > 0).astype(np.uint8)
     if not np.any(mask):
@@ -1641,11 +1680,20 @@ def _circle_square_mask_measurement(
     else:
         representative = min(widths, key=lambda item: abs(float(item['width_px']) - diameter))
     status = 'ok' if confidence >= _param_float(params, 'mask_min_confidence', 0.35) else 'failed'
+    confirmed = False
+    if profile_gray is not None and manual_circle_locked and status == 'ok':
+        a, b, shifts, confirmed = diameter_three_profiles(profile_gray, [low0, low1], [high0, high1], center_xy, chosen_radius)
+        circle_quad_diag['three_profile_shifts_px'] = shifts
+        if confirmed:
+            representative = dict(representative, left_edge_xy=a.tolist(), right_edge_xy=b.tolist(), offset_px=0.)
+            diameter = float(np.linalg.norm(b - a))
     return {
         'status': status,
         'reason': '' if status == 'ok' else 'circle_square_confidence_low',
         'diameter_px': float(diameter) if status == 'ok' else None,
         'raw_diameter_px': float(diameter),
+        'circle_diameter_method': 'three_profiles' if profile_gray is not None else 'legacy',
+        'three_profiles_confirmed': confirmed,
         'left_edge_xy': representative.get('left_edge_xy'),
         'right_edge_xy': representative.get('right_edge_xy'),
         'debug_left_edge_xy': representative.get('left_edge_xy'),
@@ -2016,6 +2064,15 @@ def _run_hybrid_profile_diameter_v3_variant(
         raise ValueError('No se pudo convertir imagen a gris.')
     shape_hw = rgb.shape[:2]
     effective_params = _normalize_params(params, method_id=method_id)
+    profile_gray = None
+    if method_id == METHOD_ID_CIRCLE_SQUARE:
+        requested = (params or {}).get('circle_diameter_method')
+        selected = processing_settings().diameter_method if requested is None else requested
+        if selected not in ('three_profiles', 'legacy'):
+            raise ValueError('Método de diámetro de círculo desconocido.')
+        effective_params['circle_diameter_method'] = selected
+        if selected == 'three_profiles':
+            profile_gray = cv2.GaussianBlur(gray_u8.astype(np.float32), (0, 0), .82)
     variant_stage = 'v3_3' if method_id == METHOD_ID_V3 else method_id.replace('hybrid_profile_diameter_', '')
     clean_points = _sanitize_points(points, shape_hw)
     if not clean_points:
@@ -2148,6 +2205,7 @@ def _run_hybrid_profile_diameter_v3_variant(
                 point_xy=original_xy,
                 orientation=selected_orientation,
                 params=point_params,
+                profile_gray=profile_gray,
             )
             measurement = interactive_measurement
             measurement_mode = str(interactive_measurement.get('measurement_mode') or 'rejected')
@@ -2350,6 +2408,8 @@ def _run_hybrid_profile_diameter_v3_variant(
             'square_half_width_px': None if measurement.get('square_half_width_px') is None else float(measurement.get('square_half_width_px') or 0.0),
             'square_vertices_xy': measurement.get('square_vertices_xy') if diameter_route == 'circle_square_mask_diameter' else None,
             'circle_square_manual_locked': bool(measurement.get('circle_square_manual_locked', False)),
+            'circle_diameter_method': effective_params.get('circle_diameter_method'),
+            'three_profiles_confirmed': measurement.get('three_profiles_confirmed'),
             'circle_square_mask_pixels': None if measurement.get('circle_square_mask_pixels') is None else int(measurement.get('circle_square_mask_pixels') or 0),
             'circle_square_measurement_mask_pixels': None if measurement.get('circle_square_measurement_mask_pixels') is None else int(measurement.get('circle_square_measurement_mask_pixels') or 0),
             'circle_square_intersection_count': None if measurement.get('circle_square_intersection_count') is None else int(measurement.get('circle_square_intersection_count') or 0),

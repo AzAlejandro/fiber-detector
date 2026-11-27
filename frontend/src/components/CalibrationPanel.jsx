@@ -89,7 +89,7 @@ export default function CalibrationPanel({
       </div>
 
       <p className="small calibration-help">
-        En una regla graduada, marca un tramo entre dos marcas consecutivas e ingresa la longitud de ese tramo. En una barra simple, marca ambos extremos e ingresa la longitud total.
+        Marca la barra completa, desde la primera hasta la última graduación o de extremo a extremo si es continua. Ingresa la longitud total impresa.
       </p>
 
       <div className="calibration-actions">

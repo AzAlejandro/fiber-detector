@@ -24,7 +24,7 @@ from .projects_store import list_projects
 router = APIRouter(prefix='/api/agent-training', tags=['Entrenamiento del agente'])
 DB = OUTPUT_ROOT / 'agent_training' / 'training.sqlite3'
 Kind = Literal['scribbles', 'circulos']
-SkillKind = Literal['scribbles', 'circulos', 'cruces']
+SkillKind = Literal['scribbles', 'circulos', 'cruces', 'descripcion']
 GUIDANCE = {
     'multifibra': 'Recorre todo el disco en la foto limpia. Si entra un ramal o un haz, desplaza el círculo a un tramo aislado y vuelve a seguir los cuatro cruces hasta la misma hebra.',
     'sin_fibra': 'Oculta las marcas y sigue los dos bordes más allá del disco en la foto original. Si solo ves grano, fondo o halo, descarta el candidato aunque la máscara produzca cuatro cruces.',
@@ -88,6 +88,13 @@ def review_patterns(marks, reviews):
 
 
 def generation_steps(kind):
+    if kind == 'descripcion':
+        return [
+            'Mira la micrografía completa y amplía una fibra, un claro de fondo y un borde difícil.',
+            'Escribe qué ves, en qué imagen o círculo y cómo reconocer el borde al medir. Indica lo que sigue dudoso.',
+            'Comprueba el ejemplo en otra zona. Si otra imagen tiene un aspecto distinto, describe esa diferencia con su nombre.',
+            'Edita la ficha y guarda una versión. Los agentes recibirán esta lectura al pintar, proponer círculos y revisar cruces.',
+        ]
     parameters = 'Toma las cantidades de los parámetros de la ejecución. Conserva los recuentos observados como evidencia de esa ronda y redacta la regla en términos de señales visibles y decisiones.'
     if kind == 'cruces':
         return [
@@ -191,7 +198,11 @@ def state(project: str, kind: SkillKind):
             WHERE r.project=? AND r.kind=? GROUP BY r.id ORDER BY r.id DESC""", (project, kind))
         catalog = db.execute('SELECT * FROM skills WHERE kind=? ORDER BY id DESC', (kind,))
         targets = project_targets(project)
-        resolved = targets.instruction(kind, current['body'])
+        resolved = current['body']
+        if kind != 'descripcion':
+            profile = active(db, project, 'descripcion')
+            resolved = (f"Lectura visual del proyecto · v{profile['version']}\n{profile['body']}\n\n"
+                        + targets.instruction(kind, current['body']))
         return dict(active={**skill_summary(current), 'execution_body': resolved}, targets=targets.model_dump(),
                     rounds=[dict(r) for r in rounds], catalog=[skill_summary(r) for r in catalog],
                     generation_steps=generation_steps(kind))
@@ -525,7 +536,7 @@ def download(sid: int):
     base = f"/api/agent-training/{{proyecto}}/{s['kind']}"
     content += "\n## Cómo generar la siguiente versión de esta skill\n\n"
     content += "\n".join(f"{i}. {step}" for i, step in enumerate(generation_steps(s['kind']), 1)) + "\n"
-    if s['kind'] == 'cruces':
+    if s['kind'] in ('cruces', 'descripcion'):
         content += f"\nLee la versión activa en `GET {base}/state`. Guarda las instrucciones revisadas con `POST {base}/skills`, enviando `expected` (active.id) y `body` (texto completo).\n"
         return Response(content, media_type='text/markdown', headers={'Content-Disposition':'attachment; filename="SKILL.md"'})
     content += f"\nDesde la API, envía a `POST {base}/skills` los campos `expected` (active.id), `body` (instrucciones completas), `round_id` y `revision` (revisión actual de la ronda).\n"

@@ -41,6 +41,7 @@ from ..scribble import decode_scribble_b64
 from ..session_store import store
 from . import persistence as drp
 from . import analysis_store
+from .v3.pipeline import _manual_dual_side_measurement
 from .pipeline import METHOD_ID, run_hybrid_profile_diameter
 from .pipeline_v2 import METHOD_ID_V2, run_hybrid_profile_diameter_v2
 from .v3 import (
@@ -3673,25 +3674,103 @@ def _editor_key(image_id, agent_run):
     return 'agent_editor_' + agent_run
 
 
+class AgentDiameterLine(BaseModel):
+    kind: Literal['mask', 'direct']
+    start: PointItem
+    end: PointItem
+    geometry_id: str = Field(min_length=1, max_length=160)
+
+
 class AgentEditorReq(BaseModel):
     session_id: str
     image_id: str
     contacts: dict[str, list[PointItem]] = Field(default_factory=dict)
 
 
+class OpenAgentEditorReq(AgentEditorReq):
+    line: AgentDiameterLine | None = None
+
+
+class DetectionLineReq(BaseModel):
+    line: AgentDiameterLine
+    contacts: dict[str, list[PointItem]] = Field(default_factory=dict)
+    remove: bool = False
+    remove_added_center: bool = False
+
+
 @router.post('/agent-editor/{run_id}')
 @_serialize_point_edit
-def open_agent_editor(run_id: str, req: AgentEditorReq):
+def open_agent_editor(run_id: str, req: OpenAgentEditorReq):
     sess = _require_active_image(req.session_id, req.image_id)
-    key = _editor_key(req.image_id, run_id)
+    run = agent_result(run_id)
+    if run['image_id'] != req.image_id:
+        raise HTTPException(422, 'La ejecución pertenece a otra imagen.')
+    state = _sync_agent_geometry(run_id, run, req.contacts, req.line)
+    if req.line:
+        _register_editor_lines(run_id, run, state['geometry'])
+    return _points_response(sess, state)
+
+
+@router.get('/agent-editor/{run_id}/lines')
+@_serialize_point_edit
+def detection_lines(run_id: str):
+    run = agent_result(run_id)
+    geometry = drp.load_points('agent_editor_' + run_id)['geometry']
+    return _detection_line_response(run_id, run, geometry)
+
+
+def _register_editor_lines(run_id, run, geometry, removed_ids=()):
+    mask = None
+    def measure(line):
+        nonlocal mask
+        params = dict(manual_left_x=line['start']['x'], manual_left_y=line['start']['y'],
+                      manual_right_x=line['end']['x'], manual_right_y=line['end']['y'])
+        length = float(np.hypot(params['manual_right_x'] - params['manual_left_x'], params['manual_right_y'] - params['manual_left_y']))
+        if line['method_id'] == METHOD_ID_MANUAL_LINE_DIRECT:
+            return dict(diameter_px=length, reason='', confidence=1.0, diameter_route=line['method_id'])
+        if mask is None:
+            mask, _, _ = _latest_prior(run['image_id'], (run['height'], run['width']), use_mask=True, prior_run_id='agent:' + run_id)
+        result, _ = _manual_dual_side_measurement(support_mask=mask, orientation={}, params=params)
+        measured = result.get('raw_diameter_px') or 0
+        reason = '' if result['status'] == 'ok' else ('Revisar los bordes en la máscara.' if measured > 0
+                  else 'Sin intersección medible con la máscara. Se usó la longitud del trazo.')
+        return dict(diameter_px=measured or length, reason=reason, confidence=result.get('mask_confidence', 0),
+                    diameter_route=line['method_id'] if measured else 'drawn_length')
+    return analysis_store.sync_agent_lines(run_id, run['image_id'], geometry, measure,
+                                          lambda: _load_calibration_data(run['image_id']), removed_ids)
+
+
+def _detection_line_response(run_id, run, geometry, removed_ids=()):
+    measurements = _register_editor_lines(run_id, run, geometry, removed_ids)
+    notes = {case['params']['geometry_id']: case.get('result_comment') or case.get('notes') or 'Revisar'
+             for case in list_cases(run['image_id']) if case.get('prior_run_id') == 'agent:' + run_id
+             and case.get('measurement_decision') in ('uncertain', 'rejected') and (case.get('params') or {}).get('geometry_id')}
+    return {**{key: geometry[key] for key in ('mask_lines', 'direct_lines')},
+            'measurements': {gid: dict(diameter_px=row['diameter_px'], diameter_nm=row.get('diameter_nm'),
+                                        review_note=notes.get(gid) or row.get('reason', '')) for gid, row in measurements.items()}}
+
+
+@router.post('/agent-editor/{run_id}/lines')
+@_serialize_point_edit
+def edit_detection_line(run_id: str, req: DetectionLineReq):
+    run = agent_result(run_id)
+    state = _sync_agent_geometry(run_id, run, req.contacts, req.line, req.remove, req.remove_added_center)
+    return {**_detection_line_response(run_id, run, state['geometry'], [req.line.geometry_id] if req.remove else []),
+            'added_center': state['added_center']}
+
+
+def _sync_agent_geometry(run_id, run, contacts, line=None, remove=False, remove_added_center=False):
+    key = 'agent_editor_' + run_id
     state = drp.load_points(key)
-    source = agent_result(run_id)['circles']
+    source = run['circles']
+    points = state['points']
+    geometry = state['geometry']
+    active = state['active_point_idx']
     manual_ids = {c['id'] for c in source if c.get('source') == 'manual'}
     previous = set(state.get('detection_manual_ids', []))
+    added_center = False
     if not state['found'] or manual_ids != previous:
-        geometry = state['geometry']
         circles = geometry['circles']
-        points = state['points']
         removed = {f'agent_{run_id}_{i}' for i in previous - manual_ids}
         for c in list(circles):
             if c['geometry_id'] in removed:
@@ -3705,12 +3784,42 @@ def open_agent_editor(run_id: str, req: AgentEditorReq):
             center = dict(x=c['x'], y=c['y'])
             circles.append(dict(center=center, radius=c['radius_px'], type='valid',
                 geometry_id=f"agent_{run_id}_{c['id']}", agent_contacts=[
-                    p.model_dump() for p in req.contacts.get(str(c['id']), [])]))
+                    p.model_dump() for p in contacts.get(str(c['id']), [])]))
             points.append(center)
         geometry['circle_active_idx'] = min(max(0, geometry['circle_active_idx']), len(circles) - 1)
-        state = drp.save_points(key, points, min(max(0, state['active_point_idx']), len(points) - 1),
+    if line:
+        field_height = run['parameters']['field_height']
+        if any(not (0 <= p.x <= run['width'] - 1 and 0 <= p.y <= field_height - 1) for p in (line.start, line.end)):
+            raise HTTPException(422, 'La línea debe quedar dentro del campo de la imagen.')
+        if np.hypot(line.end.x - line.start.x, line.end.y - line.start.y) < 1:
+            raise HTTPException(422, 'La línea debe medir al menos un píxel.')
+        lines = geometry[line.kind + '_lines']
+        center = dict(x=(line.start.x + line.end.x) / 2, y=(line.start.y + line.end.y) / 2)
+        index = next((i for i, item in enumerate(lines) if item['geometry_id'] == line.geometry_id), len(lines))
+        if index < len(lines) and (lines[index]['start'] != line.start.model_dump() or lines[index]['end'] != line.end.model_dump()):
+            raise HTTPException(409, 'La línea cambió en el editor. Vuelve a abrir la ejecución.')
+        if remove:
+            if index < len(lines):
+                lines.pop(index)
+                if remove_added_center:
+                    centers = [c['center'] for c in geometry['circles']]
+                    for other in geometry['mask_lines'] + geometry['direct_lines']:
+                        centers.append({axis: (other['start'][axis] + other['end'][axis]) / 2 for axis in ('x', 'y')})
+                    if all(np.hypot(c['x'] - center['x'], c['y'] - center['y']) > 2 for c in centers):
+                        points[:] = [p for p in points if (p['x'], p['y']) != (center['x'], center['y'])]
+            geometry[line.kind + '_line_active_idx'] = min(index, len(lines) - 1)
+        else:
+            if index == len(lines):
+                lines.append(line.model_dump())
+            geometry[line.kind + '_line_active_idx'] = index
+            active = next((i for i, p in enumerate(points) if np.hypot(p['x'] - center['x'], p['y'] - center['y']) <= 2), len(points))
+            if active == len(points):
+                points.append(center)
+                added_center = True
+    if not state['found'] or manual_ids != previous or line:
+        state = drp.save_points(key, points, min(max(0, active), len(points) - 1),
                                 geometry, detection_manual_ids=sorted(manual_ids))
-    return _points_response(sess, state)
+    return {**state, 'added_center': added_center}
 
 
 @router.post('/agent-editor/{run_id}/contacts')
@@ -3779,6 +3888,9 @@ def points_update(req: PointsUpdateReq) -> dict[str, Any]:
         geometry = drp.normalize_geometry(req.geometry)
 
     payload = drp.save_points(key, points, active, geometry=geometry)
+    if req.agent_run:
+        old_ids = [l['geometry_id'] for k in ('mask_lines', 'direct_lines') for l in state['geometry'][k]]
+        _register_editor_lines(req.agent_run, agent_result(req.agent_run), payload['geometry'], old_ids)
     return _points_response(sess, payload)
 
 
@@ -3790,6 +3902,9 @@ def points_save(req: PointsSaveReq) -> dict[str, Any]:
     payload = drp.load_points(key)
     geometry = req.geometry if req.geometry is not None else payload.get('geometry')
     saved = drp.save_points(key, list(payload.get('points') or []), int(payload.get('active_point_idx', -1)), geometry=geometry)
+    if req.agent_run:
+        old_ids = [l['geometry_id'] for k in ('mask_lines', 'direct_lines') for l in payload['geometry'][k]]
+        _register_editor_lines(req.agent_run, agent_result(req.agent_run), saved['geometry'], old_ids)
     return _points_response(sess, saved)
 
 

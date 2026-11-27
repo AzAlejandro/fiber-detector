@@ -10,6 +10,7 @@ from . import agent_masks, agent_mode
 from .agent_targets import AgentTargets, comparison
 from .agent_worklist import image_summary
 from .paths import DATA_HOME, PROJECT_ROOT
+from .processing_settings import ProcessingSettings, processing_settings, update_processing_settings
 from .projects_store import list_projects
 
 router = APIRouter(prefix='/api/agent', tags=['Modo agente'])
@@ -18,6 +19,16 @@ REVIEW_GUIDE = GUIDES.parent / 'loco-revision' / 'SKILL.md'
 AGENT_MODEL_PATH = DATA_HOME / 'data' / 'agent-model.txt'
 DEFAULT_AGENT_MODEL = 'gpt-6.2-sol'
 AGENT_MODELS = {DEFAULT_AGENT_MODEL: 'GPT-6.2 Sol', 'gpt-6.2-astra': 'GPT-6.2 Astra'}
+
+
+@router.get('/processing-settings')
+def get_processing_settings():
+    return processing_settings()
+
+
+@router.post('/processing-settings')
+def save_processing_settings(settings: ProcessingSettings):
+    return update_processing_settings(settings)
 
 
 def selected_agent_model():

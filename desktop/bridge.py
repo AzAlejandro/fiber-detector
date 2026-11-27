@@ -54,10 +54,11 @@ def run(base):
     @mcp.tool()
     def flujo_loco(metodo: Literal['GET','POST'], ruta: str, parametros: dict | None = None) -> dict:
         """Ejecutar una etapa documentada por guia_loco(herramientas=true). GET usa query y POST usa JSON."""
-        reads = (r'projects/list', r'agent/(?:worklist|target-review)', r'agent/runs(?:/[a-f0-9]+)?', r'agent/scribble-masks',
-                 r'agent-training/[\w-]+/(?:scribbles|circulos|cruces)/state',
+        reads = (r'projects/list', r'agent/(?:worklist|target-review|processing-settings)', r'agent/runs(?:/[a-f0-9]+)?', r'agent/scribble-masks',
+                 r'agent-training/[\w-]+/(?:scribbles|circulos|cruces|descripcion)/state',
                  r'diameter-research/(?:calibration/load|measurements/query)')
         writes = (r'projects/(?:upsert|activate)', r'session/new', r'library/load', r'agent/(?:runs|scribble-masks)', r'scribble/draft/save',
+                  r'agent-training/[\w-]+/descripcion/skills',
                   r'diameter-research/(?:calibration/save|run|measurements/save-from-run|agent-editor/[a-f0-9]+(?:/contacts)?)')
         if not any(re.fullmatch('/api/'+route, ruta) for route in (reads if metodo=='GET' else writes)):
             raise ValueError('Ruta fuera del flujo de procesamiento de LOCO.')

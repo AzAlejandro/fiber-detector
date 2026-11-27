@@ -11,7 +11,7 @@ const reasons = {
   scribbles: ['fibra', 'halo', 'fondo', 'dudoso', 'incorrecto'],
 }
 const colors = { fibra: '#00ddf4', halo: '#ff9e27', fondo: '#9b5af3' }
-const titles = { circulos: 'Círculos', scribbles: 'Scribbles', cruces: 'Cruces' }
+const titles = { circulos: 'Círculos', scribbles: 'Scribbles', cruces: 'Cruces', descripcion: 'Lectura visual del proyecto' }
 const fit = { x: .5, y: .5, z: 1 }
 
 export default function AgentTraining({ tab, project, projects, images }) {
@@ -220,7 +220,7 @@ function Workspace({ project, projects, images, kind, library, setLibraryKind })
       <section className="card">
         <h2>{project.name}</h2>
         {library ? <label className="field"><span>Tipo de skill</span><select value={kind} onChange={e=>setLibraryKind(e.target.value)}>
-          <option value="scribbles">Scribbles</option><option value="circulos">Círculos</option><option value="cruces">Cruces</option></select></label> : <>
+          <option value="descripcion">{titles.descripcion}</option><option value="scribbles">Scribbles</option><option value="circulos">Círculos</option><option value="cruces">Cruces</option></select></label> : <>
           <label className="field"><span>Imagen del proyecto</span><select disabled={!state||busy} value={selectedImage?.image_id||''} onChange={e=>work(()=>openImage(e.target.value))}>
             {images.map(i=><option key={i.image_id} value={i.image_id}>{i.image_name}</option>)}</select></label>
           <label className="field"><span>Ronda guardada</span><select disabled={busy||!imageRounds.length} value={round?.id||''} onChange={e=>work(async()=>showRound(await apiGet(base+'/rounds/'+e.target.value)))}>
@@ -267,7 +267,7 @@ function Workspace({ project, projects, images, kind, library, setLibraryKind })
           {draft === null ? <p className="agent-skill-text">{copy.body}</p>
             : <><textarea autoFocus className="agent-skill-editor" aria-label="Instrucciones de la skill del proyecto" value={draft}
                 maxLength={60000} disabled={busy} onChange={e=>setDraft(e.target.value)}/>
-                <span className="small">{'Variables del proyecto: {{porcentaje_pintado}}, {{cantidad_circulos}}, {{tolerancia_puntos}} y {{tolerancia_circulos}}.'}</span></>}
+                <span className="small">{kind === 'descripcion' ? 'Cita una imagen o un círculo donde se vea el detalle que describes.' : 'Variables del proyecto: {{porcentaje_pintado}}, {{cantidad_circulos}}, {{tolerancia_puntos}} y {{tolerancia_circulos}}.'}</span></>}
           {copy.evidence.round && <p className="small">Revisión de origen · ronda #{copy.evidence.round} · {copy.evidence.reviewed}/{copy.evidence.total} marcas revisadas</p>}
           {copy.parent && <div className="small">Versión de origen: {state.catalog.filter(s=>s.id===copy.parent).map(s=>originName(s.project)+' · v'+s.version).join('')}</div>}
           {copy.id!==state.active.id

@@ -79,6 +79,68 @@ def test_agent_editor_contacts_edits_and_measurement(tmp_path, monkeypatch):
     assert post('/agent-editor/'+rid,payload)['geometry']['circles']==[]
 
 
+def test_lines_drawn_in_agent_detection_use_the_selected_run(tmp_path, monkeypatch):
+    from backend.diameter_research import api
+    client, sid, iid = _setup(tmp_path, monkeypatch)
+    rid = 'b' * 32
+    source = dict(image_id=iid, width=128, height=128, parameters={'field_height': 115},
+                  circles=[dict(id=1, x=35, y=64, radius_px=10)])
+    monkeypatch.setattr(api, 'agent_result', lambda _: source)
+    mask = np.zeros((128, 128), np.float32)
+    mask[60:69] = 1
+    def prior(*args, **kwargs):
+        assert 'agent:' + rid in args or 'agent:' + rid in kwargs.values()
+        return mask, None, 'agent:' + rid
+    monkeypatch.setattr(api, '_latest_prior', prior)
+    base = '/api/diameter-research'
+    url = base + '/agent-editor/' + rid
+    args = dict(session_id=sid, image_id=iid)
+    def histogram():
+        return client.get(base+'/measurements/query', params={'image_ids': iid, 'unit': 'px'}).json()['payload']['items']
+    for kind, method in [('mask', 'manual_dual_side_caliper'), ('direct', 'manual_line_direct_caliper')]:
+        line = dict(kind=kind, geometry_id=kind+'_test', start=dict(x=64, y=50), end=dict(x=64, y=78))
+        for _ in range(2):
+            response = client.post(url, json={**args, 'line': line})
+            assert response.status_code == 200, response.text
+            editor = response.json()
+            assert len(editor['geometry'][kind+'_lines']) == 1
+            assert editor['geometry'][kind+'_line_active_idx'] == 0
+            assert len(editor['points']) == 2
+        response = client.post(base+'/run', json=dict(**args, method_id=method, prior_run_id='agent:'+rid,
+            source_mode='prior_mask', points=[dict(x=64, y=64)], params=dict(
+                manual_left_x=64, manual_left_y=50, manual_right_x=64, manual_right_y=78,
+                manual_geometry_id=line['geometry_id'])))
+        assert response.status_code == 200, response.text
+        result = response.json()['results'][0]
+        assert result['status'] == 'ok'
+        assert 7 <= result['diameter_px'] <= 10 if kind == 'mask' else np.isclose(result['diameter_px'], 28)
+        rows = histogram()
+        assert sum(r.get('geometry_id') == line['geometry_id'] for r in rows) == 1
+        assert np.isclose(next(r['diameter_px'] for r in rows if r.get('geometry_id') == line['geometry_id']), result['diameter_px'])
+        client.post(base+'/measurements/save-from-run', json={'run_id': response.json()['run_id']}).raise_for_status()
+        assert len(histogram()) == len(rows)
+    assert client.post(url, json={**args, 'line': {**line, 'end': {'x': 64, 'y': 120}}}).status_code == 422
+    geometry = client.post(url, json=args).json()['geometry']
+    assert all(len(geometry[key]) == 1 for key in ('circles', 'mask_lines', 'direct_lines'))
+    # The detection view can persist strokes without loading the editor image or generating its overlay.
+    monkeypatch.setattr(api, 'agent_manifest_path', lambda _: tmp_path)
+    extra = {**line, 'geometry_id': 'extra', 'start': {'x': 15, 'y': 20}, 'end': {'x': 24, 'y': 28}}
+    original = client.get(url+'/lines').json()
+    result = client.post(url+'/lines', json={'line': extra}).json()
+    assert result['added_center'] and 'overlay_b64' not in result
+    assert len(result['direct_lines']) == len(original['direct_lines']) + 1
+    duplicate = client.post(url+'/lines', json={'line': extra}).json()
+    assert duplicate['direct_lines'] == result['direct_lines']
+    client.post(url+'/lines', json={'line': extra, 'remove': True, 'remove_added_center': True}).raise_for_status()
+    assert client.get(url+'/lines').json() == original
+    assert len(client.post(url, json=args).json()['points']) == 2
+    assert not any(r.get('geometry_id') == 'extra' for r in histogram())
+    unsupported = {**extra, 'kind': 'mask', 'geometry_id': 'outside'}
+    note = client.post(url+'/lines', json={'line': unsupported}).json()['measurements']['outside']
+    assert note['review_note'] and np.isclose(note['diameter_px'], np.hypot(9, 8))
+    assert any(r.get('geometry_id') == 'outside' and r['diameter_route'] == 'drawn_length' for r in histogram())
+
+
 def _img(size: int = 128) -> np.ndarray:
     y, x = np.indices((size, size))
     base = np.clip((x + y) / (2 * size), 0, 1)

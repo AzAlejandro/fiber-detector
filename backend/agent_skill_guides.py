@@ -1,6 +1,7 @@
 """Initial process guides for the project skill library."""
 
 BASE = {
+    'descripcion': """Primera lectura visual pendiente. Abre la foto limpia y un recorte representativo. Describe en lenguaje cotidiano cómo se ven las fibras, el fondo y los bordes. Identifica la imagen de cada observación y dónde se ve. Si una textura puede confundirse con un borde, explica qué detalle permite distinguirlos y cuándo conviene dejar la medida pendiente. Guarda las observaciones verificadas en esta ficha y añade las diferencias que encuentres entre imágenes del proyecto.""",
     'scribbles': """Preparar el campo
 Lee el proyecto, la imagen y los parámetros de la propuesta. Toma de la ejecución la cantidad o cobertura solicitada. Comprueba el tamaño de la foto de biblioteca y usa sus coordenadas para dibujar. Excluye la leyenda, el borde instrumental y la barra de escala. Conserva el borrador manual como referencia separada hasta cerrar la propuesta.
 
@@ -23,6 +24,13 @@ Conserva la procedencia y la versión de la propuesta. Compara con los trazos ma
     'circulos': """Elegir dónde medir
 Lee la imagen, la ejecución, la máscara seleccionada y el máximo de círculos de sus parámetros. Reparte las propuestas entre tramos distinguibles del campo útil, incluyendo hebras finas y gruesas. Si varios centros caen en la misma porción continua, conserva el que mejor muestre ambos flancos. Al agotarse los tramos fiables, registra la cobertura alcanzada. Una serie de círculos en la misma hebra cuenta como varias observaciones de esa hebra.
 
+Repartir los centros por zonas y por hebras
+Antes de elegir los círculos, recorre la foto limpia completa, incluida la periferia, sin la cartela. Usa una cuadrícula orientativa (por ejemplo 4 × 4) para localizar zonas con fibras medibles. Sigue también las hebras visibles que atraviesan varias celdas. Si la máscara o la lista automática omitió una de ellas, inspecciona un recorte de la foto original y propón un centro donde puedas seguir sus dos flancos.
+
+Haz una primera pasada por las distintas zonas y hebras medibles. Da prioridad a una hebra visible que todavía carece de centro aunque su celda ya contenga círculos sobre hebras vecinas. En las pasadas siguientes, entre candidatos de igual calidad, prefiere el tramo más alejado de los centros elegidos y evita repetir la misma porción de fibra. En una hebra larga busca otro tramo separado solo después de considerar las demás. Deja libres el fondo, los haces y las uniones ambiguas.
+
+Antes de guardar, superpón un centro por círculo sobre la foto completa. Los cuatro contactos de borde corresponden a una sola medición. Revisa los claros más grandes y sigue las hebras largas sin centro. Si encuentras un tramo con cuatro cruces fiables y ya alcanzaste el objetivo, sustituye una propuesta redundante de un grupo denso y valida los contactos del nuevo círculo. Conserva las marcas aprobadas. Entrega el recuento de centros por zona y la razón visual de las omisiones relevantes.
+
 Ajustar el disco en la foto original
 Sigue una sola fibra antes de la entrada y después de la salida del círculo. Centra el disco sobre el eje y ajusta el radio para dejar visibles el ancho completo y fondo a cada lado. Recorre el perímetro y el interior. Cada flanco de esa misma hebra debe cortar el perímetro dos veces. Una unión, un haz o un vecino pueden producir cuatro transiciones en la máscara aunque la figura encierre más de una fibra.
 
@@ -44,9 +52,14 @@ Oculta la superposición y sigue los dos flancos de una sola hebra en la foto. E
 Resolver candidatos en exceso
 Superpón la máscara seleccionada para proponer transiciones y comprueba el cambio de intensidad en la foto suavizada cerca de cada una. Vuelve al original para decidir el borde físico. Cuando haya muchos puntos juntos en un arco, sigue ese flanco desde fuera del círculo hasta el perímetro. Descarta las transiciones explicadas por el borde exterior del halo, una banda interna, grano o una hebra vecina. Un punto sostenido solo por la máscara queda como tentativo. Si dos interpretaciones siguen siendo plausibles, registra el arco dudoso y deja el círculo pendiente. Evita completar el conjunto por simetría o por proximidad a los puntos de mayor contraste.
 
+Medir fibras con contraste interno
+En una hebra ancha o estriada, oculta la máscara y los puntos. Sigue cada flanco desde fuera del círculo y compara varios cortes transversales cercanos, a ambos lados del centro. En cada corte avanza desde el fondo o halo exterior hacia la fibra. Una banda clara u oscura que sigue dentro de la estructura a lo largo de esos cortes pertenece a su interior, incluso si produce el salto de intensidad más fuerte. Prolonga ambas orillas exteriores hasta sus cuatro cruces con el perímetro. Comprueba en la foto limpia que el segmento de diámetro abarca toda la anchura reconocible y termina en esas dos orillas.
+
+Cuando la persona señala cruces, relaciona esas marcas con el perímetro del círculo guardado y comprueba los otros contactos siguiendo los mismos flancos. Si las orillas delimitan varias hebras inseparables, identifica el resultado como ancho exterior de un posible haz. Si falta una orilla reconocible en la foto o hay dos interpretaciones igualmente plausibles, deja el círculo en revisión.
+
 Verificar y entregar a medición
 Marca cada contacto confirmado con un punto rojo pequeño sobre el contorno. Comprueba alternando foto y superposición que son posiciones distintas de la geometría vigente. Guarda sus coordenadas, el ID del círculo y las dudas separadas. Si cambian centro o radio, descarta los contactos anteriores para esa geometría y vuelve a localizarlos. Entrega los conjuntos confirmados al editor de Medición de diámetros de LOCO. Inspecciona que el cuadrilátero siga los dos flancos y que el segmento de diámetro atraviese el ancho de la hebra.
 
 Comprobar la escala y aprender
-Comprueba la escala guardada de esa imagen. En una regla graduada mide un tramo entre dos marcas consecutivas. Usa el valor del rótulo si corresponde a ese tramo o divídelo entre el número de intervalos iguales si corresponde a toda la regla. En una barra simple mide ambos extremos y usa el valor completo. Si el usuario ya fijó el valor de un tramo para el proyecto, guarda ese valor directamente. Registra por separado cualquier discrepancia con la cartela. Si aparece un valor extremo en Análisis, abre su intervalo en el histograma y vuelve al círculo original para distinguir un problema de contactos de uno de calibración. Conserva por separado los contactos confirmados, tentativos, corregidos y pendientes. Al proponer otra versión, documenta qué señal visual habría cambiado la decisión y compruébala en otra micrografía.""",
+Comprueba la escala guardada de esa imagen. En las micrografías TEM, calibra con la barra inferior completa. En una regla graduada, marca el centro de la primera graduación y el de la última. En una barra continua, marca sus dos extremos. Guarda una sola vez el valor y la unidad impresos. Una barra de diez intervalos rotulada 1 µm mide 1 µm de extremo a extremo. Registra cualquier discrepancia con la cartela. Si aparece un valor extremo en Análisis, abre su intervalo en el histograma y vuelve al círculo original para distinguir un problema de contactos de uno de calibración. Conserva por separado los contactos confirmados, tentativos, corregidos y pendientes. Al proponer otra versión, documenta qué señal visual habría cambiado la decisión y compruébala en otra micrografía.""",
 }

@@ -36,12 +36,26 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
   const secondary = layers.includes(comparison.secondary) && comparison.secondary !== primary ? comparison.secondary : ''
   const [overlay, setOverlay] = useState(true)
   const [showContacts, setShowContacts] = useState(true)
+  const [showZones, setShowZones] = useState(false)
   const [edgeResult, setEdgeResult] = useState(null)
   const [selection, setSelection] = useState(0)
   const [view, setView] = useState(fit)
   const [panning, setPanning] = useState(false)
   const [tool, setTool] = useState('pan')
   const [draft, setDraft] = useState(null)
+  const [savedLines, setSavedLines] = useState(null)
+  const [lineFilter, setLineFilter] = useState('all')
+  const [lineSelection, setLineSelection] = useState('')
+  const lineRevision = useRef(0)
+  const linesUrl = run && '/api/diameter-research/agent-editor/' + run.run_id + '/lines'
+  useEffect(() => {
+    if (!linesUrl) return
+    let active = true
+    const revision = lineRevision.current
+    apiGet(linesUrl).then(data => { if (active && revision === lineRevision.current) setSavedLines({ url: linesUrl, ...data }) })
+      .catch(err => { if (active) setError(err.message) })
+    return () => { active = false }
+  }, [linesUrl])
   const [opacity, setOpacity] = useState(1)
   const drag = useRef(null)
   const stageRef = useRef(null)
@@ -114,35 +128,62 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
     finally { setBusy(false) }
   }
   const circle = run?.circles[selection]
+  const lines = savedLines?.url === linesUrl && savedLines ? ['mask', 'direct'].flatMap(kind =>
+    savedLines[kind + '_lines'].map((line, index) => ({ ...line, kind, number: index + 1,
+      measured: savedLines.measurements?.[line.geometry_id] }))) : []
+  const visibleLines = lines.filter(l => lineFilter === 'all' || l.kind === lineFilter || (lineFilter === 'review' && l.measured?.review_note))
+  const selectedLine = visibleLines.find(l => l.geometry_id === lineSelection)
+  function inspectLine(line) {
+    setLineSelection(line.geometry_id)
+    const x = (line.start.x + line.end.x) / 2, y = (line.start.y + line.end.y) / 2
+    focusCircle({ x, y, radius_px: Math.max(5, Math.hypot(line.end.x-line.start.x, line.end.y-line.start.y) / 2) })
+  }
   const review = edgeReviewFor(run, circle)
-  async function editCircle(action, geometry) {
+  async function editGeometry(action, geometry) {
     let change = action === 'undo' ? undo.at(-1) : action === 'redo' ? redo.at(-1) : { action, id: circle?.id }
-    if (!run || !change || (action !== 'add' && change.id == null) || busy || editing.current) return
+    if (action === 'line') {
+      const suffix = globalThis.crypto?.randomUUID?.() || Date.now() + '_' + Math.random().toString(36).slice(2)
+      change = { action, line: { ...geometry, geometry_id: geometry.kind + '_' + suffix } }
+    }
+    if (action === 'deleteLine') change = { action, line: geometry }
+    if (!run || !change || (!change.line && action !== 'add' && change.id == null) || busy || editing.current) return
     editing.current = true
     setBusy(true)
     setError('')
     try {
-      const endpoint = '/api/agent/runs/' + run.run_id + '/circles'
-      const restoring = action === 'undo' ? change.action === 'remove' : action === 'redo' && change.action === 'add'
-      const index = run.circles.findIndex(c => c.id === change.id)
-      const updated = action === 'add' ? await apiPost(endpoint, geometry)
-        : await apiPost(endpoint + '/' + change.id + (restoring ? '/restore' : '/remove'), {})
-      if (action === 'add') change = { action, id: updated.added_circle_id }
-      setRun(updated)
+      if (change.line) {
+        const remove = change.action === 'deleteLine' ? action !== 'undo' : action === 'undo'
+        const data = await apiPost(linesUrl, { line: change.line, remove, remove_added_center: !!change.addedCenter,
+          contacts: contacts ?? await detectCircleContacts(url, run, run.circles) })
+        lineRevision.current++
+        setSavedLines({ url: linesUrl, ...data })
+        setLineSelection(remove ? '' : change.line.geometry_id)
+        if (!remove) change = { ...change, addedCenter: data.added_center }
+      } else {
+        const endpoint = '/api/agent/runs/' + run.run_id + '/circles'
+        const restoring = action === 'undo' ? change.action === 'remove' : action === 'redo' && change.action === 'add'
+        const index = run.circles.findIndex(c => c.id === change.id)
+        const updated = action === 'add' ? await apiPost(endpoint, geometry)
+          : await apiPost(endpoint + '/' + change.id + (restoring ? '/restore' : '/remove'), {})
+        if (action === 'add') change = { action, id: updated.added_circle_id }
+        setRun(updated)
+        const next = Math.max(0, restoring || action === 'add' ? updated.circles.findIndex(c => c.id === change.id) : Math.min(index, updated.circles.length - 1))
+        setSelection(next)
+        if (restoring && updated.circles[next] && view.scale > 1) focusCircle(updated.circles[next])
+      }
       setUndo(action === 'undo' ? undo.slice(0, -1) : [...undo, change])
       setRedo(action === 'undo' ? [...redo, change] : action === 'redo' ? redo.slice(0, -1) : [])
-      const next = Math.max(0, restoring || action === 'add' ? updated.circles.findIndex(c => c.id === change.id) : Math.min(index, updated.circles.length - 1))
-      setSelection(next)
-      if (restoring && updated.circles[next] && view.scale > 1) focusCircle(updated.circles[next])
     } catch (e) { setError(e.message) }
     finally { editing.current = false; setBusy(false) }
   }
   async function openMeasurements() {
+    if (editing.current) return
+    editing.current = true
     setBusy(true)
     setError('')
-    try { await onMeasure(run, contacts || {}) }
+    try { await onMeasure(run, contacts) }
     catch (e) { setError(e.message) }
-    finally { setBusy(false) }
+    finally { editing.current = false; setBusy(false) }
   }
   const url = run && API_BASE + '/api/agent/runs/' + run.run_id
   function displayLayer(layer) {
@@ -209,6 +250,7 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
 
   function selectCircle(index) {
     if (!run?.circles[index]) return
+    setLineSelection('')
     setSelection(index)
     if (view.scale > 1) focusCircle(run.circles[index])
   }
@@ -231,7 +273,7 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
       const mod = e.ctrlKey || e.metaKey
       if (drag.current && key !== 'escape') return
       if (mod && (key === 'z' || key === 'y')) {
-        if (!e.repeat) editCircle(key === 'y' || e.shiftKey ? 'redo' : 'undo')
+        if (!e.repeat) editGeometry(key === 'y' || e.shiftKey ? 'redo' : 'undo')
       } else if (mod) return
       else if (key === 'pagedown' || key === 'pageup') stepImage(key === 'pagedown' ? 1 : -1)
       else if (!run) {
@@ -239,7 +281,7 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
         openRun(null, true)
       }
       else if (key === 'delete' || key === 'backspace') {
-        if (!e.repeat) editCircle('remove')
+        if (!e.repeat) selectedLine ? editGeometry('deleteLine', selectedLine) : editGeometry('remove')
       } else if (key === 'arrowright' || key === 'arrowdown') selectCircle(selection + 1)
       else if (key === 'arrowleft' || key === 'arrowup') selectCircle(selection - 1)
       else if (key === 'home' || key === 'end') selectCircle(key === 'home' ? 0 : run.circles.length - 1)
@@ -248,6 +290,7 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
       else if (key === '0') setView(fit)
       else if (key === 'f' && circle) focusCircle(circle)
       else if (key === 'v') { if (!e.repeat) setOverlay(value => !value) }
+      else if (key === 'd' || key === 'x') chooseTool(key === 'd' ? 'mask' : 'direct')
       else if (key === 'c' || key === 'm' || key === 'escape') chooseTool(key === 'c' ? 'circle' : 'pan')
       else return
       e.preventDefault()
@@ -274,16 +317,24 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
     const { center, radius } = circleFromDiameter(start, imagePoint(e), run.width, run.parameters.field_height)
     return { ...center, radius_px: radius }
   }
+  function drawnLine(e, start) {
+    const point = imagePoint(e)
+    return { start, end: {
+      x: Math.max(0, Math.min(point.x, run.width - 1)),
+      y: Math.max(0, Math.min(point.y, run.parameters.field_height - 1)),
+    }, kind: tool }
+  }
   function startPan(e) {
     if (e.button !== 0 || !e.isPrimary) return
     const svg = e.currentTarget
     stageRef.current.focus({ preventScroll: true })
-    if (tool === 'circle') {
+    if (tool !== 'pan') {
       if (busy || editing.current) return
       const {x, y} = imagePoint(e)
       if (x < 0 || y < 0 || x > run.width - 1 || y > run.parameters.field_height - 1) return
-      drag.current = { circleStart: { x, y } }
-      setDraft({x, y, radius_px: 0})
+      const start = { x, y }
+      drag.current = { start }
+      setDraft(tool === 'circle' ? {x, y, radius_px: 0} : drawnLine(e, start))
       svg.setPointerCapture(e.pointerId)
       e.preventDefault()
       return
@@ -296,8 +347,8 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
   function movePan(e) {
     const start = drag.current
     if (!start || !e.isPrimary) return
-    if (start.circleStart) {
-      setDraft(drawnCircle(e, start.circleStart))
+    if (start.start) {
+      setDraft(tool === 'circle' ? drawnCircle(e, start.start) : drawnLine(e, start.start))
       return
     }
     const dx = e.clientX - start.clientX
@@ -309,13 +360,21 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
   function endPan(e) {
     if (!e.isPrimary) return
     const start = drag.current
-    if (start?.circleStart) {
+    if (start?.start) {
       if (e.type === 'pointerup') {
-        const circle = drawnCircle(e, start.circleStart)
-        if (circle.radius_px >= 1) editCircle('add', circle)
+        if (tool === 'circle') {
+          const circle = drawnCircle(e, start.start)
+          if (circle.radius_px >= 1) editGeometry('add', circle)
+        } else {
+          const line = drawnLine(e, start.start)
+          if (Math.hypot(line.end.x - line.start.x, line.end.y - line.start.y) >= 1) editGeometry('line', line)
+        }
       }
       setDraft(null)
-    } else if (e.type === 'pointerup' && start && !start.moved && start.index !== null) setSelection(Number(start.index))
+    } else if (e.type === 'pointerup' && start && !start.moved && start.index !== null) {
+      setLineSelection('')
+      setSelection(Number(start.index))
+    }
     drag.current = null
     setPanning(false)
   }
@@ -355,6 +414,16 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
             <label className="field"><span>Umbral de contraste (fondo − suavizada ≥ umbral)</span><input disabled={maskSource === 'scribble'} required type="number" min="1" max="100" step="any" value={threshold} onChange={e => setThreshold(e.target.value)} /></label>
           </details>
         </form>
+        {run?.zone_sampling && <details className="agent-settings">
+          <summary>Distribución al detectar · {run.zone_sampling.zones.length} zonas</summary>
+          <p>{run.zone_sampling.selected} de {run.zone_sampling.requested} círculos.</p>
+          <label className="mask-toggle"><input type="checkbox" checked={showZones} onChange={e => setShowZones(e.target.checked)} />Mostrar cuadrícula</label>
+          <table><thead><tr><th>Zona</th><th>Fibra</th><th>Cupo</th><th>Colocados</th></tr></thead>
+            <tbody>{run.zone_sampling.zones.map(z => <tr key={z.zone}><td>{z.zone}</td>
+              <td>{(100 * z.fiber_pixels / (z.area_pixels || 1)).toLocaleString('es', {maximumFractionDigits: 1})}%</td>
+              <td>{z.quota}</td><td>{z.selected}</td></tr>)}</tbody>
+          </table>
+        </details>}
         {(error || edgeError || currentMask?.error) && <p role="alert">{error || edgeError || currentMask.error}</p>}
       </section>
       <section className="card">
@@ -397,6 +466,8 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
       <h2>Detección de fibras y bordes</h2>
       <div className="viewer-toolbar loco-toolbar">
         <button className={'icon-tool' + (tool === 'pan' ? ' toggle-active' : '')} aria-pressed={tool === 'pan'} title="Mover vista (M)" disabled={!run} onClick={() => chooseTool('pan')}>{handIcon}Mano</button>
+        <button className={'icon-tool' + (tool === 'mask' ? ' toggle-active' : '')} aria-pressed={tool === 'mask'} title="Traza a través de la fibra para medir con la máscara de esta ejecución (D)" disabled={busy || !run} onClick={() => chooseTool('mask')}>Línea agente</button>
+        <button className={'icon-tool' + (tool === 'direct' ? ' toggle-active' : '')} aria-pressed={tool === 'direct'} title="Traza de borde a borde para medir entre los extremos (X)" disabled={busy || !run} onClick={() => chooseTool('direct')}>Línea manual</button>
         <button className={'icon-tool' + (tool === 'circle' ? ' toggle-active' : '')} aria-pressed={tool === 'circle'} title="Dibujar de borde a borde (C)" disabled={!canStartDrawing} onClick={() => run ? chooseTool('circle') : openRun(null, true)}>Círculo</button>
         <span className="toolbar-sep" />
         <button className="icon-tool" aria-label="Alejar" onClick={() => zoomBy(0.84)} disabled={!run}>-</button>
@@ -415,7 +486,7 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
         </label>
         <button className="primary" type="submit" form="agent-run" disabled={busy || !id || (maskSource !== 'agente' && !supportId)}>{busy ? 'Procesando…' : 'Detectar fibras y bordes'}</button>
         <button disabled={!circle} onClick={() => focusCircle(circle)}>Zoom al círculo</button>
-        <button disabled={busy || !contacts || !run?.circles.length} onClick={openMeasurements}>Abrir medición de diámetros</button>
+        <button disabled={busy || !run || (run.circles.length > 0 && !contacts)} onClick={() => openMeasurements()}>Abrir medición de diámetros</button>
       </div>
       <div className="loco-workspace loco-lab-workspace">
         <div id="agent-stage" ref={stageRef} tabIndex={0} aria-label="Visor de círculos" className={'stage loco-stage mode-' + tool + (panning ? ' is-panning' : '') + (run ? ' has-image' : '')}>
@@ -426,6 +497,10 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
             <image crossOrigin="anonymous" href={displayLayer(primary)} width={run.width} height={run.height} preserveAspectRatio="none" />
             {secondaryLayer && <image crossOrigin="anonymous" href={secondaryLayer} width={run.width} height={run.height} preserveAspectRatio="none"
               opacity={comparison.opacity / 100} pointerEvents="none" />}
+            {showZones && run.zone_sampling?.zones.map(z => <g key={z.zone} pointerEvents="none">
+              <rect x={z.x0} y={z.y0} width={z.x1-z.x0} height={z.y1-z.y0} fill="none" stroke="#ffdc74" vectorEffect="non-scaling-stroke" />
+              <text x={z.x0+5} y={z.y0+18} fill="white" stroke="#222" strokeWidth="3" paintOrder="stroke" fontSize="16">Z{z.zone}</text>
+            </g>)}
             {run.circles.map((c,i) => <g key={c.id} className={i === selection ? 'agent-circle-selected' : 'agent-circle'}>
               {overlay && <circle opacity={opacity} data-circle-index={i} cx={c.x} cy={c.y} r={c.radius_px} className={i === selection ? 'loco-best-circle' : 'loco-seed-circle'}>
                 <title>Círculo {c.id}</title>
@@ -437,7 +512,13 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
                 <circle key={'tentative'+j} className="agent-edge-dot agent-edge-tentative" pointerEvents="none"
                   cx={p.x} cy={p.y} r={Math.min(0.85, 3.5 / view.scale)} />)}
             </g>)}
-            {draft && <circle pointerEvents="none" cx={draft.x} cy={draft.y} r={draft.radius_px} className="loco-best-circle" />}
+            {visibleLines.map(l =>
+              <line key={l.geometry_id} data-diameter-line={l.kind + '_lines'} pointerEvents="none"
+                x1={l.start.x} y1={l.start.y} x2={l.end.x} y2={l.end.y}
+                stroke={l.kind === 'mask' ? '#55dae4' : '#ffce42'} strokeWidth={l === selectedLine ? 4 : 2} vectorEffect="non-scaling-stroke" />)}
+            {draft?.start ? <line pointerEvents="none" x1={draft.start.x} y1={draft.start.y} x2={draft.end.x} y2={draft.end.y}
+              stroke="#ffce42" vectorEffect="non-scaling-stroke" strokeWidth="2" />
+              : draft && <circle pointerEvents="none" cx={draft.x} cy={draft.y} r={draft.radius_px} className="loco-best-circle" />}
           </svg> : <div className="placeholder">{busy ? 'Cargando imagen…' : id ? 'Pulsa Detectar fibras y bordes o dibuja un círculo en la imagen.' : 'Agrega una imagen al proyecto para procesarla.'}</div>}
         </div>
         <aside className="loco-debug-panel loco-lab-panel">
@@ -458,6 +539,23 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
             </>}
           </details>
           <div className="loco-lab-section">
+            <h3>Líneas en Análisis</h3>
+            <label className="field"><span>Filtrar líneas</span><select value={lineFilter} onChange={e => { setLineFilter(e.target.value); setLineSelection('') }}>
+              <option value="all">Todas</option><option value="review">Para revisar</option>
+              <option value="mask">Línea agente</option><option value="direct">Línea manual</option>
+            </select></label>
+            {lineFilter === 'review' && <p className="small">Las líneas marcadas para revisión cuentan en el histograma.</p>}
+            <div className="loco-candidate-list">
+              {visibleLines.map(l => <button key={l.geometry_id} className={l === selectedLine ? 'selected' : ''} aria-pressed={l === selectedLine}
+                onClick={() => inspectLine(l)}>Línea {l.kind === 'mask' ? 'agente' : 'manual'} {l.number}
+                {l.measured && <span>{l.measured.diameter_nm != null ? l.measured.diameter_nm.toFixed(2) + ' nm' : l.measured.diameter_px.toFixed(2) + ' px'}{l.measured.review_note && ' · Revisar'}</span>}
+              </button>)}
+              {!visibleLines.length && <p className="small">Sin líneas en esta vista.</p>}
+            </div>
+            {selectedLine?.measured?.review_note && <p className="small">{selectedLine.measured.review_note}</p>}
+            <button className="danger" disabled={busy || !selectedLine} onClick={() => editGeometry('deleteLine', selectedLine)}>Eliminar línea de Análisis</button>
+          </div>
+          <div className="loco-lab-section">
             <h3>Círculos propuestos</h3>
             <div className="loco-candidate-list" ref={listRef}>
               {run?.circles.length ? run.circles.map((c, i) => <button key={c.id} aria-pressed={i === selection}
@@ -466,12 +564,12 @@ function AgentWorkspace({ image, projectId, circleGoal, imagePicker, handIcon, o
                   {contacts?.[c.id]?.some(p=>!p.supported) && ' · Revisar contraste'}</em>
               </button>) : <div className="placeholder small">Sin círculos.</div>}
             </div>
-            <button className="danger" title="Supr o Retroceso" disabled={busy || !circle} onClick={() => editCircle('remove')}>
+            <button className="danger" title="Supr o Retroceso" disabled={busy || !circle} onClick={() => editGeometry('remove')}>
               {circle ? 'Eliminar círculo #' + circle.id : 'Eliminar círculo'}
             </button>
             <div className="inline">
-              <button disabled={busy || !undo.length} title="Ctrl + Z" onClick={() => editCircle('undo')}>Deshacer</button>
-              <button disabled={busy || !redo.length} title="Ctrl + Y" onClick={() => editCircle('redo')}>Rehacer</button>
+              <button disabled={busy || !undo.length} title="Ctrl + Z" onClick={() => editGeometry('undo')}>Deshacer</button>
+              <button disabled={busy || !redo.length} title="Ctrl + Y" onClick={() => editGeometry('redo')}>Rehacer</button>
             </div>
           </div>
           {run && <a className="file-action" href={url} target="_blank" rel="noreferrer">Ver parámetros y coordenadas en JSON</a>}

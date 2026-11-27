@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { apiPost } from '../api'
 import { convertScaleLength } from './CalibrationPanel'
+import { scaleBarBounds } from '../scaleBarView.mjs'
 
 const format = new Intl.NumberFormat('es-CL', { maximumSignificantDigits: 8 })
 
@@ -13,24 +14,39 @@ function horizontalLine(start, end) {
   return [start, { x: end.x, y: start.y }]
 }
 
-export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
+export default function ScalePhotoDialog({ photo, onClose, onSaved, handIcon }) {
   const dialog = useRef(null)
   const stage = useRef(null)
+  const image = useRef(null)
   const target = useRef(null)
+  const pan = useRef(null)
+  const [panning, setPanning] = useState(false)
   const [viewport, setViewport] = useState({ width: 1, height: 1 })
   const [size, setSize] = useState(null)
   const [zoom, setZoom] = useState(1)
   const [failed, setFailed] = useState(false)
   const [editing, setEditing] = useState(photo.reviewScale === 'editar')
-  const cal = photo.calibration
+  const [saved, setSaved] = useState(null)
+  const cal = saved || photo.calibration
   const [value, setValue] = useState(() => cal?.direct_factor ? '' : String(cal?.known_value ?? ''))
   const [unitCode, setUnitCode] = useState(cal?.unit || 'nm')
   const [draftLine, setDraftLine] = useState(null)
-  const [drawing, setDrawing] = useState(editing && !savedLine(cal))
+  const [drawing, setDrawing] = useState(editing)
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const gesture = useRef(null)
+  const saving = useRef(false)
+  const focusScale = useRef(editing)
+  const valueInput = useRef(null)
+  const [status, setStatus] = useState('')
+
+  useEffect(() => {
+    if (!draftLine && cal) {
+      setValue(cal.direct_factor ? '' : String(cal.known_value ?? ''))
+      setUnitCode(cal.unit || 'nm')
+    }
+  }, [photo.calibration])
 
   useEffect(() => {
     const el = dialog.current
@@ -50,7 +66,6 @@ export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
   const pixels = line ? Math.abs(line[1].x - line[0].x) : 0
   const knownValue = Number(value.trim().replace(',', '.'))
   const conversion = knownValue / pixels
-  const canSave = size && !failed && !busy && !drawing && !preview && pixels > 0 && conversion > 0 && Number.isFinite(conversion)
 
   function imagePoint(e) {
     const point = new DOMPoint(e.clientX, e.clientY).matrixTransform(e.currentTarget.getScreenCTM().inverse())
@@ -91,37 +106,60 @@ export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
     gesture.current = null
     if (drag.handle) {
       const next = adjustedLine(drag, imagePoint(e))
-      if (Math.abs(next[1].x - next[0].x) >= 1) setDraftLine(next)
+      if (Math.abs(next[1].x - next[0].x) >= 1) finishLine(next)
       setPreview(null)
       return
     }
     if (!drag.finishing && Math.abs(e.clientX - drag.x) < 3) return
     const end = imagePoint(e)
     if (Math.abs(end.x - drag.start.x) < 1) return
-    setDraftLine(horizontalLine(drag.start, end))
     setPreview(null)
-    setDrawing(false)
+    finishLine(horizontalLine(drag.start, end))
   }
-  async function save(e) {
-    e.preventDefault()
-    if (!canSave) return
-    const [a, b] = line
-    const payload = { image_id: photo.image_id, enabled: true, unit: unitCode, known_value: knownValue,
-      pixel_distance: pixels, unit_per_px: conversion, line_x1: a.x, line_y1: a.y, line_x2: b.x, line_y2: b.y }
+  function finishLine(next) {
+    setDraftLine(next)
+    setDrawing(false)
+    if (knownValue > 0 && Number.isFinite(knownValue)) save(next)
+    else {
+      setStatus('Ingresa la longitud impresa para guardar.')
+      valueInput.current?.focus()
+    }
+  }
+  async function save(next, length = knownValue, unit = unitCode) {
+    if (!next || saving.current) return
+    if (!Number.isFinite(length) || length <= 0) {
+      setStatus('Ingresa una longitud mayor que cero para guardar.')
+      return
+    }
+    const [a, b] = next
+    const distance = Math.abs(b.x - a.x)
+    if (distance < 1) return
+    const payload = { image_id: photo.image_id, enabled: true, unit, known_value: length,
+      pixel_distance: distance, unit_per_px: length / distance, line_x1: a.x, line_y1: a.y, line_x2: b.x, line_y2: b.y }
+    if (cal && ['unit', 'known_value', 'line_x1', 'line_x2', 'line_y1', 'line_y2'].every(key => cal[key] === payload[key])) {
+      setStatus('Escala guardada.')
+      return
+    }
+    saving.current = true
     setBusy(true)
     setError('')
     try {
       const response = await apiPost('/api/diameter-research/calibration/save', payload)
-      onSaved(photo.image_id, response.calibration || payload, response.measurements?.updated_count)
-      onClose()
-    } catch (err) { setError(err.message); setBusy(false) }
+      const result = response.calibration || payload
+      setSaved(result)
+      onSaved(photo.image_id, result, response.measurements?.updated_count)
+      setStatus('Escala guardada.')
+    } catch (err) { setError(err.message); setStatus('') }
+    finally { saving.current = false; setBusy(false) }
   }
 
-  function changeZoom(next, point) {
+  function changeZoom(next, point, anchor) {
     const el = stage.current
-    target.current = point || {
-      x: (el.scrollLeft + el.clientWidth / 2 - Math.max(0, (el.clientWidth - width) / 2)) / width,
-      y: (el.scrollTop + el.clientHeight / 2 - Math.max(0, (el.clientHeight - height) / 2)) / height,
+    const at = anchor || { x: el.clientWidth / 2, y: el.clientHeight / 2 }
+    target.current = {
+      x: point?.x ?? (el.scrollLeft + at.x - Math.max(0, (el.clientWidth - width) / 2)) / width,
+      y: point?.y ?? (el.scrollTop + at.y - Math.max(0, (el.clientHeight - height) / 2)) / height,
+      at,
     }
     const nextZoom = Math.max(1, Math.min(32, next))
     if (nextZoom === zoom) centerView()
@@ -131,45 +169,107 @@ export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
     const point = target.current
     const el = stage.current
     if (!point || !el) return
-    el.scrollTo(Math.max(0, point.x * width - el.clientWidth / 2), Math.max(0, point.y * height - el.clientHeight / 2))
+    el.scrollTo(point.x * width - point.at.x, point.y * height - point.at.y)
     target.current = null
   }
   useLayoutEffect(centerView, [width, height])
 
+  useEffect(() => {
+    const el = stage.current
+    function wheel(e) {
+      if (!(e.ctrlKey || e.metaKey)) return
+      e.preventDefault()
+      if (!size || gesture.current || pan.current || !e.deltaY) return
+      const rect = el.getBoundingClientRect()
+      const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1)
+      changeZoom(zoom * Math.exp(-Math.max(-250, Math.min(250, delta)) * .002), null, {
+        x: (e.clientX - rect.left) * el.clientWidth / rect.width,
+        y: (e.clientY - rect.top) * el.clientHeight / rect.height,
+      })
+    }
+    el.addEventListener('wheel', wheel, { passive: false })
+    return () => el.removeEventListener('wheel', wheel)
+  }, [size, zoom, width, height])
+
+  function showScale() {
+    const bounds = scaleBarBounds(image.current, line)
+    changeZoom(Math.min(viewport.width / (bounds.right - bounds.left),
+      viewport.height / (bounds.bottom - bounds.top)) / factor, {
+      x: (bounds.left + bounds.right) / (2 * size.width),
+      y: (bounds.top + bounds.bottom) / (2 * size.height),
+    })
+  }
+  useLayoutEffect(() => {
+    if (focusScale.current && size && viewport.width > 1 && viewport.height > 1 && cal !== undefined) {
+      focusScale.current = false
+      showScale()
+    }
+  }, [size, viewport, editing, cal])
+  function selectTool(draw) {
+    gesture.current = null
+    setPreview(null)
+    setDrawing(draw)
+    if (draw) {
+      setStatus('')
+      setEditing(true)
+    }
+  }
+  function editScale() {
+    const bar = scaleBarBounds(image.current, line)
+    const frame = image.current.getBoundingClientRect()
+    const visible = stage.current.getBoundingClientRect()
+    const nearBar = frame.left + bar.right * frame.width / size.width >= visible.left
+      && frame.left + bar.left * frame.width / size.width <= visible.right
+      && frame.top + bar.bottom * frame.height / size.height >= visible.top
+      && frame.top + bar.top * frame.height / size.height <= visible.bottom
+    if (zoom === 1 || !nearBar) {
+      if (editing) showScale()
+      else focusScale.current = true
+    }
+    selectTool(true)
+  }
+
+  function startPan(e) {
+    if (!size || drawing || e.button !== 0 || !e.isPrimary || e.target.closest('[data-handle]')) return
+    const el = e.currentTarget
+    pan.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop,
+      ratio: el.clientWidth / el.getBoundingClientRect().width }
+    el.setPointerCapture(e.pointerId)
+    setPanning(true)
+    e.preventDefault()
+  }
+  function movePan(e) {
+    const p = pan.current
+    if (p && e.isPrimary) e.currentTarget.scrollTo(p.left - (e.clientX - p.x) * p.ratio, p.top - (e.clientY - p.y) * p.ratio)
+  }
+  function endPan(e) {
+    if (!e.isPrimary || !pan.current) return
+    pan.current = null
+    setPanning(false)
+  }
+
   return <dialog className="scale-photo-dialog" ref={dialog} aria-labelledby="scale-photo-title"
     onCancel={e => { e.preventDefault(); if (!busy) onClose() }} onClick={e => { if (!busy && e.target === dialog.current) onClose() }}>
-    <div className="point-review-head">
-      <div><h2 id="scale-photo-title">{photo.image_name}</h2>
-        {!editing && <p>{photo.scaleError || (hasScale ? [
-          line && (format.format(cal.known_value) + ' ' + unit + ' = ' + format.format(cal.pixel_distance) + ' px'),
-          format.format(cal.unit_per_px) + ' ' + unit + '/px',
-        ].filter(Boolean).join(' · ') : cal === undefined ? 'Cargando escala…' : 'Sin escala guardada')}</p>}
-      </div>
-      <button type="button" className="icon-tool" disabled={busy} onClick={onClose} autoFocus>Cerrar</button>
-    </div>
     <div className="viewer-toolbar">
+      <h2 id="scale-photo-title">{photo.image_name}</h2>
+      <button type="button" className="icon-tool" disabled={!size || busy || cal === undefined}
+        onClick={editScale}>Editar escala</button>
+      <button type="button" className={'icon-tool' + (!drawing ? ' toggle-active' : '')} aria-pressed={!drawing} disabled={!size}
+        onClick={() => selectTool(false)}>{handIcon}Mano</button>
+      <button type="button" className={'icon-tool' + (drawing ? ' toggle-active' : '')} aria-pressed={drawing}
+        disabled={!size || busy || cal === undefined} onClick={() => selectTool(true)}>Dibujar línea</button>
       <button type="button" className="icon-tool" aria-label="Reducir zoom" disabled={!size || zoom <= 1} onClick={() => changeZoom(zoom / 1.5)}>−</button>
       <button type="button" className="icon-tool" aria-label="Ampliar foto" disabled={!size || zoom >= 32} onClick={() => changeZoom(zoom * 1.5)}>+</button>
       <button type="button" className="icon-tool" disabled={!size} onClick={() => changeZoom(1)}>Ajustar vista</button>
-      {!editing && <button type="button" className="icon-tool" disabled={!size || cal === undefined} onClick={() => {
-        setValue(cal?.direct_factor ? '' : String(cal?.known_value ?? ''))
-        setUnitCode(cal?.unit || 'nm')
-        setDrawing(!line)
-        setEditing(true)
-      }}>Editar escala</button>}
-      {pixels > 0 && <button type="button" className="icon-tool" disabled={!size} onClick={() => changeZoom(
-        Math.min(viewport.width, viewport.height) * .7 / (pixels * factor),
-        { x: (line[0].x + line[1].x) / (2 * size.width), y: (line[0].y + line[1].y) / (2 * size.height) }
-      )}>Ver barra de escala</button>}
-      {editing && <button type="button" className="icon-tool" disabled={!size || busy || (!line && drawing)} onClick={() => {
-        setDrawing(!drawing); setPreview(null); gesture.current = null
-      }}>{drawing && line ? 'Cancelar trazado' : 'Marcar línea'}</button>}
+      <span className="zoom-chip">{Math.round(zoom * 100)}%</span>
+      <button type="button" className="icon-tool scale-photo-close" disabled={busy} onClick={onClose} autoFocus>Cerrar</button>
     </div>
-    <div className="scale-photo-stage" ref={stage}>
+    <div className={'scale-photo-stage' + (panning ? ' is-panning' : '')} ref={stage}
+      onPointerDown={startPan} onPointerMove={movePan} onPointerUp={endPan} onLostPointerCapture={endPan} onPointerCancel={endPan}>
       {failed || photo.error ? <p role="alert">{photo.error || 'No se pudo abrir la foto.'}</p>
         : photo.loading ? <p>Cargando foto…</p>
         : <div className="scale-photo-canvas">
-          <div className="scale-photo-frame" style={{ width, height }}><img src={photo.url} alt={photo.image_name} draggable="false"
+          <div className="scale-photo-frame" style={{ width, height }}><img ref={image} src={photo.url} alt={photo.image_name} draggable="false"
             style={{ width, height }} onLoad={e => setSize({ width: e.target.naturalWidth, height: e.target.naturalHeight })}
             onError={() => setFailed(true)} />
           {size && <svg className={'scale-photo-overlay' + (drawing ? ' drawing' : '')} viewBox={`-0.5 -0.5 ${size.width} ${size.height}`}
@@ -192,22 +292,28 @@ export default function ScalePhotoDialog({ photo, onClose, onSaved }) {
           </svg>}</div>
         </div>}
     </div>
-    {editing && <form className="scale-photo-form" onSubmit={save}>
-      <p>{drawing ? (preview ? 'Marca el segundo extremo.' : 'Marca dos graduaciones consecutivas o los extremos de una barra simple.')
-        : 'Arrastra los extremos para ajustar la línea o el tramo amarillo para moverla.'}</p>
-      <p>Ingresa el valor de un tramo según la calibración del proyecto. Por ejemplo, si cada tramo vale 1 µm, marca dos divisiones consecutivas e ingresa 1 µm.</p>
-      <label>Longitud conocida <input aria-label="Valor de escala" inputMode="decimal" value={value} disabled={busy}
-        onChange={e => setValue(e.target.value)} /></label>
-      <label>Unidad <select aria-label="Unidad de escala" value={unitCode} disabled={busy} onChange={e => {
-        setValue(String(convertScaleLength(value, unitCode, e.target.value)))
-        setUnitCode(e.target.value)
-      }}>
-        <option value="nm">nm</option><option value="um">µm</option>
-      </select></label>
-      {pixels > 0 && !drawing && <output>{format.format(pixels)} px
-        {Number.isFinite(conversion) && conversion > 0 && ` · ${format.format(conversion)} ${unitCode === 'um' ? 'µm' : 'nm'}/px`}</output>}
-      <button type="submit" disabled={!canSave}>Guardar escala</button>
-      {error && <p role="alert">{error}</p>}
-    </form>}
+    <div className="scale-photo-footer">
+      <div className="scale-photo-form" style={{ visibility: editing ? 'visible' : 'hidden' }}>
+        <label>Longitud de la barra <input ref={valueInput} aria-label="Valor de escala" inputMode="decimal" value={value} disabled={busy}
+          onChange={e => { setValue(e.target.value); setStatus('') }}
+          onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          onBlur={() => { if (draftLine && !drawing) save(draftLine) }} /></label>
+        <label>Unidad <select aria-label="Unidad de escala" value={unitCode} disabled={busy} onChange={e => {
+          const converted = convertScaleLength(value, unitCode, e.target.value)
+          setValue(String(converted))
+          setUnitCode(e.target.value)
+          if (draftLine && !drawing) save(draftLine, Number(converted), e.target.value)
+        }}>
+          <option value="nm">nm</option><option value="um">µm</option>
+        </select></label>
+        {pixels > 0 && <output style={{ visibility: drawing || !editing ? 'hidden' : 'visible' }}>{format.format(pixels)} px
+          {Number.isFinite(conversion) && conversion > 0 && ` · ${format.format(conversion)} ${unitCode === 'um' ? 'µm' : 'nm'}/px`}</output>}
+        <span role="status">{busy ? 'Guardando…' : drawing ? (preview ? 'Marca el último extremo.' : 'Traza la barra completa para guardarla.') : status}</span>
+        {error && <span role="alert">{error} <button type="button" onClick={() => save(draftLine)}>Reintentar</button></span>}
+      </div>
+      {!editing && <div className="scale-photo-hint">{photo.scaleError || (hasScale
+        ? [line && format.format(cal.known_value) + ' ' + unit + ' = ' + format.format(cal.pixel_distance) + ' px', format.format(cal.unit_per_px) + ' ' + unit + '/px'].filter(Boolean).join(' · ')
+        : 'Sin escala guardada')} · Ctrl + rueda para ampliar</div>}
+    </div>
   </dialog>
 }

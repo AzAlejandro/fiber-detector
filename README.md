@@ -38,9 +38,11 @@ La edición de escritorio incluye el motor y la interfaz. Si utilizas un agente 
 
 Cada círculo debe abarcar una sola fibra. Sus dos bordes cruzan el perímetro en cuatro puntos. El segmento amarillo del esquema muestra el ancho transversal que se quiere medir. En la interfaz puedes volver al círculo y comprobar si los dos bordes pertenecen a la misma fibra.
 
-**La escala se calibra por imagen.** En una regla graduada, marca dos graduaciones consecutivas y asigna la longitud física de ese intervalo. Por ejemplo, si el proyecto establece **1 µm por tramo**, introduce **1 µm**. Si la leyenda describe la regla completa, divide ese valor por el número de intervalos iguales. En una barra simple, marca ambos extremos y usa el valor completo.
+**La escala se calibra por imagen.** En las micrografías TEM, calibra con la barra inferior completa. En una regla graduada, marca el centro de la primera graduación y el de la última. En una barra continua, marca sus dos extremos. Guarda una sola vez el valor y la unidad impresos. Una barra de diez intervalos rotulada 1 µm mide 1 µm de extremo a extremo.
 
 ## Qué puedes delegar
+
+En **Entrenamiento del agente → Biblioteca de skills → Lectura visual del proyecto** puedes describir cómo se ve una fibra en tus imágenes y guardar ejemplos con su nombre o número de círculo. Los agentes reciben la versión vigente al pintar, escoger círculos y medir sus bordes.
 
 Cuando entregas un lote, el coordinador asigna un subagente a cada archivo. En un proceso completo, cada uno guarda los trazos, la máscara, los círculos, los cruces y los diámetros de su imagen. Después, el coordinador reabre las imágenes y comprueba la escala, las marcas y los objetivos antes de entregar las mediciones. [Guía del agente](.agents/skills/loco-inicio/SKILL.md) · [Criterios de revisión](.agents/skills/loco-revision/SKILL.md)
 
@@ -64,6 +66,10 @@ flowchart LR
 En **Configuración → Objetivos** puedes guardar la cobertura de pintura, la cantidad de círculos y sus márgenes para el proyecto. El **modo Agente** está activo por defecto. En **Configuración → Conexión → Modelo para nuevos agentes** puedes elegir **GPT-6.2 Sol** (predeterminado) o **GPT-6.2 Astra**. La elección se guarda para los siguientes subagentes.
 
 ## Trabajar con los resultados
+
+En **Configuración → Procesamiento** puedes elegir los filtros de máscara y detección para las siguientes ejecuciones. Por defecto están activos el suavizado inicial, la corrección local del fondo y la continuidad longitudinal. Puedes activar por separado el alineamiento, la poda del esqueleto, el contraste adaptativo (CLAHE) y el realce por orientación. En los círculos, **D · Tres perfiles transversales** ajusta los extremos del diámetro cuando tres cortes vecinos concuerdan. Puedes volver a **Anterior · Geometría de la máscara** en el mismo panel. Ambos métodos conservan el círculo y sus contactos.
+
+El **muestreo por zonas** divide el campo útil en 2 filas y 4 columnas de forma predeterminada. Cada zona recibe una parte de los círculos solicitados proporcional a su área de fibra en la máscara. Una zona vacía recibe cero. Los círculos deben corresponder a tramos medibles, con separación y cuatro contactos, incluso cuando sobra cupo. Puedes cambiar la cuadrícula, desactivar la redistribución de sobrantes o volver al muestreo anterior. En **Detección de fibras y bordes → Distribución al detectar** puedes comparar el cupo y los círculos colocados y superponer la cuadrícula a la imagen.
 
 - **Revisar una muestra.** Filtra por proyecto, imagen o etiquetas, inspecciona los diámetros individuales y compara su distribución. Puedes exportar el histograma en SVG y los datos en CSV.
 - **Repetir un ensayo.** Las copias independientes conservan las marcas, calibraciones y mediciones de cada proyecto. En **Configuración → Exportar** puedes guardar un ZIP del proyecto para llevarlo a otra instalación.

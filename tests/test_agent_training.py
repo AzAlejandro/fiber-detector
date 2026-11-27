@@ -97,6 +97,27 @@ def test_crossing_skill_has_independent_versions_and_export(tmp_path, monkeypatc
     assert client.post(f'{base}/a/cruces/rounds', json={'image_id':'x', 'skill_id':first['id']}).status_code == 422
 
 
+def test_visual_reading_follows_project_across_all_stages(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, 'DB', tmp_path / 'training.db')
+    monkeypatch.setattr(training, 'list_projects', lambda: {'projects': [{'project_id': p} for p in ('a', 'b')]})
+    client = TestClient(app)
+    base = '/api/agent-training'
+    profile = base + '/a/descripcion'
+    first = client.get(profile+'/state').json()['active']
+    example = 'En la imagen 111 se distingue una banda oscura dentro de la fibra.'
+    change = dict(expected=first['id'], body=example)
+    second = client.post(profile+'/skills', json=change).json()
+    assert second['version'] == 2
+    assert client.post(profile+'/skills', json=change).status_code == 409
+    for kind in ('scribbles', 'circulos', 'cruces'):
+        a = client.get(f'{base}/a/{kind}/state').json()['active']
+        b = client.get(f'{base}/b/{kind}/state').json()['active']
+        assert example in a['execution_body'] and example not in a['body']
+        assert example not in b['execution_body']
+    export = client.get(f"{base}/skills/{second['id']}/SKILL.md").text
+    assert example in export and '/descripcion/rounds' not in export
+
+
 def test_review_patterns_separate_confusions_and_individual_controls():
     proposals = ['halo','fondo','halo','halo','halo','halo','halo','fibra']
     decisions = ['fibra','fibra','ok','bulk','dudoso',None,'ok','incorrecto']
